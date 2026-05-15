@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(Get-Content \"C:\\\\Users\\\\IBRAHI~1.ZOA\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-ibrahim-zoaib-Downloads-Pyhton-EStatement\\\\09523168-78e2-4cd3-8372-bcdbfe416d0c\\\\tasks\\\\b8o45h72m.output\")",
+      "Bash(node -e ' *)"
+    ]
+  }
+}

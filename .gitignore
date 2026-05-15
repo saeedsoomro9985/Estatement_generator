@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+output/
+pdf_oxide_gen/target/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+

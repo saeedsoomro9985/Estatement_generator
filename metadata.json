@@ -1,0 +1,6 @@
+{
+  "name": "Statement3M: High-Performance PDF Engine",
+  "description": "A high-throughput statement generation engine designed to process 3 million statements per day with multiple account summaries and transaction details.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["PDF Generation", "Data Simulation"]
+}
