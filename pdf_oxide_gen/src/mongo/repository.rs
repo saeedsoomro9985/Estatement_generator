@@ -5,6 +5,7 @@ use mongodb::{
     options::{ClientOptions, FindOptions},
     Client,
 };
+use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 use crate::perf::MongoFetchTimings;
@@ -91,12 +92,13 @@ pub async fn fetch_statements(
     );
 
     let deserialize_start = Instant::now();
-    let mut documents = Vec::with_capacity(raw_docs.len());
-    for raw in raw_docs {
-        let doc: StatementDocument = bson::from_slice(raw.as_bytes())
-            .context("BSON deserialize into StatementDocument failed")?;
-        documents.push(doc);
-    }
+    let documents: Vec<StatementDocument> = raw_docs
+        .into_par_iter()
+        .map(|raw| {
+            bson::from_slice(raw.as_bytes())
+                .context("BSON deserialize into StatementDocument failed")
+        })
+        .collect::<Result<Vec<_>>>()?;
     let bson_deserialize_elapsed = deserialize_start.elapsed();
 
     eprintln!(
