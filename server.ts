@@ -41,6 +41,63 @@ function findRustBinary(): string | null {
 /** Default max wait for Rust batch (Mongo + PDF). Override with RUST_PDF_TIMEOUT_MS. */
 const RUST_PDF_TIMEOUT_MS = Number(process.env.RUST_PDF_TIMEOUT_MS) || 10 * 60 * 1000;
 
+/** PDFs written by pdf_oxide_gen use this prefix. */
+const OXIDE_PDF_PREFIX = "OXIDE-";
+
+function listOxidePdfs(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.startsWith(OXIDE_PDF_PREFIX) && f.toLowerCase().endsWith(".pdf"))
+    .sort();
+}
+
+/** Snapshot filename → mtimeMs for detecting new writes after a Rust run. */
+function snapshotOxidePdfs(dir: string): Map<string, number> {
+  const snap = new Map<string, number>();
+  for (const name of listOxidePdfs(dir)) {
+    try {
+      snap.set(name, fs.statSync(path.join(dir, name)).mtimeMs);
+    } catch {
+      /* file removed between list and stat */
+    }
+  }
+  return snap;
+}
+
+/** Files that are new or were modified since `before`. */
+function newOrUpdatedOxidePdfs(dir: string, before: Map<string, number>): string[] {
+  const out: string[] = [];
+  for (const name of listOxidePdfs(dir)) {
+    try {
+      const mtime = fs.statSync(path.join(dir, name)).mtimeMs;
+      const prev = before.get(name);
+      if (prev === undefined || mtime > prev) {
+        out.push(name);
+      }
+    } catch {
+      /* skip */
+    }
+  }
+  return out;
+}
+
+function normalizeDirForCompare(p: string): string {
+  return path.resolve(p).replace(/^\\\\\?\\/, "").toLowerCase();
+}
+
+function logOutputDirState(label: string, dir: string) {
+  const exists = fs.existsSync(dir);
+  const files = exists ? listOxidePdfs(dir) : [];
+  console.log(
+    `[rust-pdf] ${label} dir=${dir} exists=${exists} OXIDE-pdf_count=${files.length}`
+  );
+  if (files.length > 0) {
+    const sample = files.slice(0, 5).map((f) => path.join(dir, f));
+    console.log(`[rust-pdf] ${label} sample: ${sample.join("; ")}`);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function startServer() {
@@ -128,19 +185,31 @@ async function startServer() {
       const mongoUri = process.env.MONGODB_URI ?? "mongodb://localhost:27017";
       const mongoDatabase = process.env.MONGODB_DATABASE ?? "EStatements";
       const mongoCollection = process.env.MONGODB_COLLECTION ?? "Statements";
+      const outputDirAbs = path.resolve(outputDir);
+      fs.mkdirSync(outputDirAbs, { recursive: true });
+      const channelCap = 500;
       const args = [
         String(totalCount),
         "--mongo-uri", mongoUri,
         "--database", mongoDatabase,
         "--collection", mongoCollection,
-        "--output-dir", outputDir,
+        "--output-dir", outputDirAbs,
         "--workers", String(numCPU),
+        "--chunk-size", String(channelCap),
         "--mode", "batch",
       ];
 
+      logOutputDirState("BEFORE spawn", outputDirAbs);
+      const pdfSnapshotBefore = snapshotOxidePdfs(outputDirAbs);
+
       console.log(`[rust-pdf] spawning: ${rustBinaryPath}`);
+      console.log(`[rust-pdf] cwd: ${process.cwd()}`);
+      console.log(`[rust-pdf] expected output: ${outputDirAbs}`);
       console.log(`[rust-pdf] args: ${args.join(" ")}`);
       console.log(`[rust-pdf] timeout: ${RUST_PDF_TIMEOUT_MS}ms`);
+      console.log(
+        `[rust-pdf] NOTE: PDFs are written here (not pdf_oxide_gen/output): ${outputDirAbs}`
+      );
 
       const { spawnSync } = await import("child_process");
       const started = Date.now();
@@ -149,6 +218,7 @@ async function startServer() {
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
         timeout: RUST_PDF_TIMEOUT_MS,
+        cwd: process.cwd(),
       });
 
       const elapsed = ((Date.now() - started) / 1000).toFixed(2);
@@ -195,20 +265,43 @@ async function startServer() {
         workers: number;
         chunk_size: number;
         mode: string;
+        output_dir?: string;
+        written?: number;
+        produced?: number;
+        decoded?: number;
+        rendered?: number;
       } | null = null;
 
-      try {
-        oxideResult = JSON.parse(result.stdout.trim());
-      } catch {
-        const match = result.stdout?.match(/\{[\s\S]*\}/);
-        if (match) {
-          try {
-            oxideResult = JSON.parse(match[0]);
-          } catch (parseErr) {
-            console.error("[rust-pdf] could not parse stdout JSON:", parseErr);
+      const parseStdoutJson = (stdout: string) => {
+        const trimmed = stdout.trim();
+        if (!trimmed) return null;
+        try {
+          return JSON.parse(trimmed);
+        } catch {
+          const lines = trimmed.split(/\r?\n/).filter((l) => l.trim().length > 0);
+          for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i].trim();
+            if (line.startsWith("{")) {
+              try {
+                return JSON.parse(line);
+              } catch {
+                /* try previous line */
+              }
+            }
           }
+          const match = trimmed.match(/\{[\s\S]*\}/);
+          if (match) {
+            try {
+              return JSON.parse(match[0]);
+            } catch {
+              return null;
+            }
+          }
+          return null;
         }
-      }
+      };
+
+      oxideResult = parseStdoutJson(result.stdout ?? "");
 
       if (!oxideResult) {
         const msg = "pdf_oxide_gen succeeded but returned no JSON on stdout";
@@ -221,17 +314,85 @@ async function startServer() {
         });
       }
 
+      logOutputDirState("AFTER spawn", outputDirAbs);
+
+      const rustReportedDir = oxideResult.output_dir
+        ? path.resolve(oxideResult.output_dir)
+        : outputDirAbs;
+      if (
+        normalizeDirForCompare(rustReportedDir) !==
+        normalizeDirForCompare(outputDirAbs)
+      ) {
+        console.warn(
+          `[rust-pdf] path mismatch: server expected ${outputDirAbs}, Rust wrote to ${rustReportedDir}`
+        );
+      }
+
+      const allPdfFiles = listOxidePdfs(outputDirAbs);
+      const newPdfFiles = newOrUpdatedOxidePdfs(outputDirAbs, pdfSnapshotBefore);
+      const rustWritten = oxideResult.written ?? oxideResult.generated;
+
       console.log(
-        `[rust-pdf] ok generated=${oxideResult.generated} duration=${oxideResult.duration}s tps=${oxideResult.tps}`
+        `[rust-pdf] verify | json.generated=${oxideResult.generated} json.written=${rustWritten} ` +
+          `json.produced=${oxideResult.produced ?? "?"} decoded=${oxideResult.decoded ?? "?"} ` +
+          `rendered=${oxideResult.rendered ?? "?"} | all_on_disk=${allPdfFiles.length} ` +
+          `new_this_run=${newPdfFiles.length}`
       );
+      if (newPdfFiles.length > 0) {
+        console.log(
+          `[rust-pdf] new files: ${newPdfFiles
+            .slice(0, 10)
+            .map((f) => path.join(outputDirAbs, f))
+            .join("; ")}${newPdfFiles.length > 10 ? " …" : ""}`
+        );
+      }
+
+      const stderrSnippet = result.stderr?.trim().slice(-4000);
+
+      if (newPdfFiles.length === 0) {
+        const msg =
+          `Rust finished but wrote 0 new PDF(s) to ${outputDirAbs}. ` +
+          `JSON reported ${rustWritten} written. ` +
+          `Look in project root /output (not pdf_oxide_gen/output). ` +
+          `Check MongoDB (${mongoUri}) and server console [rust-pdf] logs.`;
+        return res.status(500).json({
+          success: false,
+          error: msg,
+          outputDir: outputDirAbs,
+          rustOutputDir: rustReportedDir,
+          expectedCount: Number(totalCount),
+          reportedGenerated: oxideResult.generated,
+          reportedWritten: rustWritten,
+          allPdfCount: allPdfFiles.length,
+          stderr: stderrSnippet,
+          stdout: result.stdout?.trim() || undefined,
+        });
+      }
+
+      if (newPdfFiles.length < rustWritten) {
+        console.warn(
+          `[rust-pdf] partial write: Rust reported ${rustWritten} written but only ${newPdfFiles.length} new file(s) detected`
+        );
+      }
 
       return res.json({
         success: true,
         totalGenerated: oxideResult.generated,
+        filesWritten: newPdfFiles.length,
+        filesOnDisk: allPdfFiles.length,
         duration: oxideResult.duration,
         tps: oxideResult.tps,
         engine: `Rust · pdf-oxide · ${oxideResult.workers} threads · chunk ${oxideResult.chunk_size}`,
-        outputDir,
+        outputDir: outputDirAbs,
+        rustOutputDir: rustReportedDir,
+        pdfFiles: newPdfFiles.slice(0, 20).map((f) => path.join(outputDirAbs, f)),
+        pipeline: {
+          produced: oxideResult.produced,
+          decoded: oxideResult.decoded,
+          rendered: oxideResult.rendered,
+          written: oxideResult.written ?? oxideResult.generated,
+        },
+        stderrSnippet: stderrSnippet?.slice(-500),
       });
     }
 

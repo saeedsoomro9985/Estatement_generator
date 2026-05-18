@@ -4,6 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "build:rust": "cargo build --release --manifest-path pdf_oxide_gen/Cargo.toml",
+    "test:rust-pdf": "npm run build:rust && node scripts/test-rust-pdf.mjs",
     "dev": "tsx server.ts",
     "dev:ui": "vite",
     "build": "vite build",

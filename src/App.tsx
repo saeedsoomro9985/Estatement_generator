@@ -31,7 +31,17 @@ export default function App() {
   const [testMode, setTestMode] = useState(false);
   const [testCount, setTestCount] = useState(100);
   const [testProgress, setTestProgress] = useState(0);
-  const [results, setResults] = useState<{ tps: number; totalTime: number; engine: string } | null>(null);
+  const [results, setResults] = useState<{
+    tps: number;
+    totalTime: number;
+    engine: string;
+    outputDir?: string;
+    rustOutputDir?: string;
+    filesWritten?: number;
+    filesOnDisk?: number;
+    pdfFiles?: string[];
+    pipeline?: { produced?: number; decoded?: number; rendered?: number; written?: number };
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeEngine, setActiveEngine] = useState<'node' | 'python' | 'python-rl' | 'rust'>('node');
 
@@ -106,7 +116,23 @@ export default function App() {
       });
 
       const raw = await response.text();
-      let data: { success?: boolean; error?: string; tps?: number; duration?: number; engine?: string };
+      let data: {
+        success?: boolean;
+        error?: string;
+        tps?: number;
+        duration?: number;
+        engine?: string;
+        outputDir?: string;
+        rustOutputDir?: string;
+        filesWritten?: number;
+        filesOnDisk?: number;
+        pdfFiles?: string[];
+        pipeline?: { produced?: number; decoded?: number; rendered?: number; written?: number };
+        stderr?: string;
+        stdout?: string;
+        stderrSnippet?: string;
+        reportedWritten?: number;
+      };
       try {
         data = JSON.parse(raw);
       } catch {
@@ -114,10 +140,39 @@ export default function App() {
       }
 
       if (!response.ok || !data.success) {
-        throw new Error(data.error || `HTTP ${response.status}: ${response.statusText}`);
+        const detail = [
+          data.error,
+          data.outputDir ? `Output folder: ${data.outputDir}` : null,
+          data.rustOutputDir && data.rustOutputDir !== data.outputDir
+            ? `Rust path: ${data.rustOutputDir}`
+            : null,
+          data.reportedWritten != null
+            ? `Rust reported ${data.reportedWritten} written`
+            : null,
+          data.stderr?.slice(0, 800),
+        ]
+          .filter(Boolean)
+          .join('\n');
+        throw new Error(detail || `HTTP ${response.status}: ${response.statusText}`);
       }
 
-      setResults({ tps: data.tps!, totalTime: data.duration!, engine: data.engine! });
+      if (activeEngine === 'rust' && (data.filesWritten ?? 0) === 0) {
+        throw new Error(
+          `Rust reported success but 0 new PDF files. Check: ${data.outputDir ?? 'output/'} (not pdf_oxide_gen/output)`
+        );
+      }
+
+      setResults({
+        tps: data.tps!,
+        totalTime: data.duration!,
+        engine: data.engine!,
+        outputDir: data.outputDir,
+        rustOutputDir: data.rustOutputDir,
+        filesWritten: data.filesWritten,
+        filesOnDisk: data.filesOnDisk,
+        pdfFiles: data.pdfFiles,
+        pipeline: data.pipeline,
+      });
       setTestProgress(testCount);
     } catch (err) {
       console.error(err);
@@ -400,7 +455,9 @@ export default function App() {
                 </div>
                 {activeEngine === 'rust' && (
                   <p className="text-[9px] mt-2 opacity-50 italic">
-                    Rust pdf-oxide — loads from MongoDB (MONGODB_URI). Requires pdf_oxide_gen binary and MongoDB.
+                    Rust pdf-oxide — MongoDB (MONGODB_URI). PDFs save to{' '}
+                    <span className="font-mono">{'{project}/output'}</span> (OXIDE-*.pdf), not pdf_oxide_gen/output.
+                    Run <span className="font-mono">npm run build:rust</span> after code changes.
                   </p>
                 )}
                 {activeEngine === 'python' && (
@@ -470,6 +527,34 @@ export default function App() {
                   </div>
                   <div className="relative z-10">
                     <h4 className="text-green-900 font-bold text-xs uppercase tracking-widest mb-3">Test Results</h4>
+                    {results.outputDir && (
+                      <p className="text-[10px] text-green-800/80 font-mono mb-2 break-all">
+                        Output folder: {results.outputDir}
+                        {results.filesWritten != null
+                          ? ` — ${results.filesWritten} new PDF(s) this run`
+                          : ''}
+                        {results.filesOnDisk != null ? ` (${results.filesOnDisk} total OXIDE-*.pdf)` : ''}
+                      </p>
+                    )}
+                    {results.pdfFiles && results.pdfFiles.length > 0 && (
+                      <ul className="text-[9px] font-mono text-green-900/70 mb-3 max-h-24 overflow-y-auto space-y-0.5">
+                        {results.pdfFiles.slice(0, 8).map((p) => (
+                          <li key={p} className="truncate">
+                            {p}
+                          </li>
+                        ))}
+                        {results.pdfFiles.length > 8 && (
+                          <li className="opacity-60">+{results.pdfFiles.length - 8} more…</li>
+                        )}
+                      </ul>
+                    )}
+                    {results.pipeline && (
+                      <p className="text-[9px] font-mono text-green-800/60 mb-3">
+                        pipeline: produced={results.pipeline.produced ?? '?'} decoded=
+                        {results.pipeline.decoded ?? '?'} rendered={results.pipeline.rendered ?? '?'} written=
+                        {results.pipeline.written ?? '?'}
+                      </p>
+                    )}
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <p className="text-[10px] text-green-700/60 uppercase font-mono">Engine Used</p>
@@ -478,13 +563,16 @@ export default function App() {
                       <div className="text-right">
                         <p className="text-[10px] text-green-700/60 uppercase font-mono">Throughput</p>
                         <p className="text-2xl font-black text-green-950 font-mono tracking-tighter">
-                          {results.tps} <span className="text-[10px]">s/sec</span>
+                          {results.tps} <span className="text-[10px]">PDF/sec</span>
+                        </p>
+                        <p className="text-[9px] text-green-800/50 font-mono mt-1">
+                          {results.totalTime}s total
                         </p>
                       </div>
                     </div>
                     {results.tps >= 30 ? (
                       <div className="mt-4 flex items-center gap-2 text-[10px] font-bold text-green-800 bg-green-200/50 p-2 rounded-lg">
-                        <Zap className="w-3 h-3" /> TARGET 30S/SEC ACHIEVED
+                        <Zap className="w-3 h-3" /> TARGET 30 PDF/SEC ACHIEVED
                       </div>
                     ) : (
                       <div className="mt-4 text-[9px] text-green-800/60 flex items-start gap-1">

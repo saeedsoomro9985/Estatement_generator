@@ -2,6 +2,7 @@ pub mod customer;
 pub mod mongo;
 pub mod pdf_primitives;
 pub mod perf;
+pub mod pipeline;
 pub mod render;
 pub mod statement;
 
