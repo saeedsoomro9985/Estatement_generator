@@ -41,6 +41,22 @@ function findRustBinary(): string | null {
 /** Default max wait for Rust batch (Mongo + PDF). Override with RUST_PDF_TIMEOUT_MS. */
 const RUST_PDF_TIMEOUT_MS = Number(process.env.RUST_PDF_TIMEOUT_MS) || 10 * 60 * 1000;
 
+function buildMssqlConnectionString(): string {
+  if (process.env.MSSQL_URL?.trim()) return process.env.MSSQL_URL.trim();
+  const server = process.env.MSSQL_SERVER ?? "localhost\\SQLEXPRESS02";
+  const port = process.env.MSSQL_PORT?.trim();
+  const serverWithPort = port ? `${server},${port}` : server;
+  const database = process.env.MSSQL_DATABASE ?? "Statements";
+  const user = process.env.MSSQL_USER ?? "sa";
+  const password = process.env.MSSQL_PASSWORD ?? "Realme5i+123";
+  return `Driver={ODBC Driver 17 for SQL Server};Server=localhost,1433;Database=Statements;Uid=sa;Pwd=Realme5i+123;TrustServerCertificate=Yes;Encrypt=no;`;
+}
+
+const DEFAULT_MACHINE_ID = process.env.MACHINE_ID ?? "PSG-BSD-SAEED1";
+const QUEUE_BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE) || 100;
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 500;
+const MSSQL_BATCH_SIZE = Number(process.env.MSSQL_BATCH_SIZE) || 50;
+
 /** PDFs written by pdf_oxide_gen use this prefix. */
 const OXIDE_PDF_PREFIX = "OXIDE-";
 
@@ -167,7 +183,7 @@ async function startServer() {
 
   // API: Stress Test Endpoint
   app.post("/api/stress-test", async (req, res) => {
-    const { totalCount, engine = "node" } = req.body;
+    const { totalCount, engine = "node", machineId: bodyMachineId } = req.body;
     console.log(`[stress-test] engine=${engine} totalCount=${totalCount}`);
 
     if (engine === "rust") {
@@ -188,16 +204,26 @@ async function startServer() {
       const outputDirAbs = path.resolve(outputDir);
       fs.mkdirSync(outputDirAbs, { recursive: true });
       const channelCap = 500;
+      const machineId = String(bodyMachineId ?? DEFAULT_MACHINE_ID);
+      const mssqlUrl = buildMssqlConnectionString();
+      const maxRecords = Number(totalCount) || 0;
       const args = [
-        String(totalCount),
+        String(maxRecords),
         "--mongo-uri", mongoUri,
         "--database", mongoDatabase,
         "--collection", mongoCollection,
         "--output-dir", outputDirAbs,
         "--workers", String(numCPU),
         "--chunk-size", String(channelCap),
-        "--mode", "batch",
+        "--mode", "queue",
+        "--machine-id", machineId,
+        "--mssql-url", mssqlUrl,
+        "--queue-batch-size", String(QUEUE_BATCH_SIZE),
+        "--poll-interval-ms", String(POLL_INTERVAL_MS),
+        "--sql-batch-size", String(MSSQL_BATCH_SIZE),
       ];
+
+      console.log(`[rust-pdf] machine_id=${machineId} queue_batch=${QUEUE_BATCH_SIZE}`);
 
       logOutputDirState("BEFORE spawn", outputDirAbs);
       const pdfSnapshotBefore = snapshotOxidePdfs(outputDirAbs);

@@ -1,5 +1,6 @@
 pub mod customer;
 pub mod mongo;
+pub mod sql;
 pub mod pdf_primitives;
 pub mod perf;
 pub mod pipeline;

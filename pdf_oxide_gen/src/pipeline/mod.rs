@@ -1,9 +1,26 @@
-//! Streaming producer–consumer pipeline for large-scale PDF batch generation.
+//! Streaming pipelines: SQL queue (primary) and legacy Mongo-direct.
 
 mod decode;
+mod legacy_pdf;
+mod mongo_fetch;
 mod pdf_workers;
 mod producer;
+mod queue_pipeline;
+mod queue_producer;
+mod status_updater;
 mod writer;
+
+pub use mongo_fetch::EnrichedWork;
+pub use pdf_workers::PdfArtifact;
+pub use producer::RawBson;
+pub use queue_pipeline::{
+    queue_config_from_args, run_queue_pipeline, QueuePipelineConfig, QueuePipelineResult,
+};
+
+pub use self::queue_pipeline::run_queue_pipeline as run_sql_queue_pipeline;
+
+// Legacy Mongo-direct pipeline (kept for local testing without SQL queue).
+pub use decode::DecodedCustomer;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,11 +34,6 @@ use crossbeam_channel::{bounded, unbounded};
 use crate::mongo::MongoConfig;
 use crate::perf;
 
-pub use decode::DecodedCustomer;
-pub use pdf_workers::PdfArtifact;
-pub use producer::RawBson;
-
-/// Tunable pipeline layout (bounded channels between every stage).
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub mongo: MongoConfig,
@@ -31,9 +43,7 @@ pub struct PipelineConfig {
     pub decode_workers: usize,
     pub pdf_workers: usize,
     pub writer_threads: usize,
-    /// Backpressure on Mongo ingress only (downstream uses unbounded queues).
     pub raw_channel_capacity: usize,
-    /// MongoDB cursor `batch_size` (documents per server round-trip).
     pub mongo_batch_size: u32,
 }
 
@@ -66,33 +76,26 @@ impl PipelineProgress {
     }
 }
 
-/// Run the full streaming pipeline. Only the Mongo producer thread talks to MongoDB.
+/// Legacy: MongoDB cursor → PDF (no SQL queue).
 pub fn run_pipeline(config: PipelineConfig) -> Result<PipelineResult> {
     let start = Instant::now();
     let progress = PipelineProgress::new();
-
     let timings = perf::PipelineTimings::new_shared();
 
     eprintln!(
-        "[pdf-oxide] pipeline | decode={} pdf={} writer={} | raw_channel={} | mongo_batch={}",
-        config.decode_workers,
-        config.pdf_workers,
-        config.writer_threads,
-        config.raw_channel_capacity,
-        config.mongo_batch_size,
+        "[pdf-oxide] legacy mongo-pipeline | decode={} pdf={} writer={}",
+        config.decode_workers, config.pdf_workers, config.writer_threads
     );
 
-    std::fs::create_dir_all(&config.output_dir).with_context(|| {
-        format!(
-            "Failed to create output directory: {}",
-            config.output_dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&config.output_dir)?;
 
-    // Bounded only at Mongo ingress; unbounded downstream avoids decode/pdf deadlocks.
     let (raw_tx, raw_rx) = bounded(config.raw_channel_capacity);
-    let (customer_tx, customer_rx) = unbounded();
-    let (pdf_tx, pdf_rx) = unbounded();
+    let (customer_tx, customer_rx) = bounded(config.raw_channel_capacity);
+    let (pdf_tx, pdf_rx) = bounded(config.raw_channel_capacity);
+    let (status_tx, status_rx) = bounded(1024);
+    std::thread::spawn(move || {
+        while status_rx.recv().is_ok() {}
+    });
 
     let decode_handles = decode::spawn_decode_workers(
         config.decode_workers,
@@ -102,91 +105,57 @@ pub fn run_pipeline(config: PipelineConfig) -> Result<PipelineResult> {
         Arc::clone(&timings),
     );
 
-    let pdf_handles = pdf_workers::spawn_pdf_workers(
+    let writer_handles = writer::spawn_writer_workers(
+        config.writer_threads,
+        config.output_dir.clone(),
+        pdf_rx,
+        Arc::clone(&progress.written),
+        status_tx,
+    );
+
+    let pdf_handles = legacy_pdf::spawn_legacy_pdf_workers(
         config.pdf_workers,
         customer_rx,
         pdf_tx.clone(),
         Arc::clone(&progress.rendered),
     );
 
-    let writer_handles = writer::spawn_writer_workers(
-        config.writer_threads,
-        config.output_dir.clone(),
-        pdf_rx,
-        Arc::clone(&progress.written),
-    );
-
-    let producer_cfg = config.clone();
-    let producer_progress = Arc::clone(&progress.produced);
     let producer_timings = Arc::clone(&timings);
     let producer_handle: JoinHandle<Result<usize>> = std::thread::spawn(move || {
         producer::run_mongo_producer(
-            &producer_cfg.mongo,
-            producer_cfg.limit,
-            producer_cfg.statement_id.as_deref(),
-            producer_cfg.mongo_batch_size,
+            &config.mongo,
+            config.limit,
+            config.statement_id.as_deref(),
+            config.mongo_batch_size,
             raw_tx,
-            producer_progress,
+            Arc::clone(&progress.produced),
             producer_timings,
         )
     });
 
-    let produced = producer_handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("Mongo producer thread panicked"))??;
+    let produced = producer_handle.join().map_err(|_| anyhow::anyhow!("producer panicked"))??;
 
     for h in decode_handles {
-        h.join()
-            .map_err(|_| anyhow::anyhow!("Decode worker panicked"))??;
+        h.join().map_err(|_| anyhow::anyhow!("decode panicked"))??;
     }
     drop(customer_tx);
 
     for h in pdf_handles {
-        h.join()
-            .map_err(|_| anyhow::anyhow!("PDF worker panicked"))??;
+        h.join().map_err(|_| anyhow::anyhow!("pdf panicked"))??;
     }
     drop(pdf_tx);
-
     for h in writer_handles {
-        h.join()
-            .map_err(|_| anyhow::anyhow!("Writer worker panicked"))??;
+        h.join().map_err(|_| anyhow::anyhow!("writer panicked"))??;
     }
 
-    let decoded = progress.decoded.load(Ordering::Relaxed);
-    let rendered = progress.rendered.load(Ordering::Relaxed);
-    let written = progress.written.load(Ordering::Relaxed);
-
-    timings.log_fetch_vs_decode(produced);
-
-    eprintln!(
-        "[pdf-oxide] pipeline complete | produced={} decoded={} rendered={} written={} | {:.3}s",
-        produced,
-        decoded,
-        rendered,
-        written,
-        perf::secs(start.elapsed()),
-    );
-
-    if produced == 0 {
-        anyhow::bail!(
-            "No statements streamed from {}.{} (uri: {})",
-            config.mongo.database,
-            config.mongo.collection,
-            config.mongo.uri
-        );
-    }
-    if written == 0 {
-        anyhow::bail!(
-            "No PDF files were written to {}",
-            config.output_dir.display()
-        );
-    }
+    let produced_n = produced;
+    timings.log_fetch_vs_decode(produced_n);
 
     Ok(PipelineResult {
-        produced,
-        decoded,
-        rendered,
-        written,
+        produced: produced_n,
+        decoded: progress.decoded.load(Ordering::Relaxed),
+        rendered: progress.rendered.load(Ordering::Relaxed),
+        written: progress.written.load(Ordering::Relaxed),
         duration_secs: start.elapsed().as_secs_f64(),
         mongo_fetch_secs: perf::secs(timings.mongo_fetch()),
         decode_secs: perf::secs(timings.decode_total()),
@@ -202,21 +171,16 @@ pub fn pipeline_config_from_workers(
     chunk_size_hint: Option<usize>,
 ) -> PipelineConfig {
     let cpus = workers.max(1);
-    let pdf_workers = cpus.saturating_sub(1).max(1);
-    let decode_workers = 2.min(limit.max(1));
-    let writer_threads = 2;
     let raw_cap = chunk_size_hint.unwrap_or(512).clamp(64, 5000);
-    let mongo_batch_size = chunk_size_hint.unwrap_or(100).clamp(16, 2000) as u32;
-
     PipelineConfig {
         mongo,
         limit,
         statement_id,
         output_dir,
-        decode_workers,
-        pdf_workers,
-        writer_threads,
+        decode_workers: 2.min(limit.max(1)),
+        pdf_workers: cpus.saturating_sub(1).max(1),
+        writer_threads: 2,
         raw_channel_capacity: raw_cap,
-        mongo_batch_size,
+        mongo_batch_size: chunk_size_hint.unwrap_or(100).clamp(16, 2000) as u32,
     }
 }

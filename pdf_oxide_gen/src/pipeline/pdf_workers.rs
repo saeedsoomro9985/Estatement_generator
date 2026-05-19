@@ -1,4 +1,4 @@
-//! Stage 3: CPU-bound PDF rendering pool (no MongoDB, no disk IO).
+//! Stage 3: CPU-bound PDF rendering pool (no MongoDB, no SQL).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -6,24 +6,26 @@ use std::thread::{self, JoinHandle};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::pipeline::decode::DecodedCustomer;
+use crate::pipeline::mongo_fetch::EnrichedWork;
 use crate::render::render_pdf;
 
-/// Rendered PDF bytes handed off to the writer stage.
+/// Rendered PDF bytes + queue metadata for writer / SQL status.
 pub struct PdfArtifact {
+    pub queue_id: i64,
+    pub cif: String,
     pub customer_id: String,
     pub bytes: Vec<u8>,
 }
 
 pub fn spawn_pdf_workers(
     worker_count: usize,
-    customer_rx: Receiver<DecodedCustomer>,
+    enriched_rx: Receiver<EnrichedWork>,
     pdf_tx: Sender<PdfArtifact>,
     rendered: std::sync::Arc<AtomicUsize>,
 ) -> Vec<JoinHandle<Result<()>>> {
     (0..worker_count)
         .map(|id| {
-            let rx = customer_rx.clone();
+            let rx = enriched_rx.clone();
             let tx = pdf_tx.clone();
             let progress = std::sync::Arc::clone(&rendered);
             thread::Builder::new()
@@ -36,18 +38,25 @@ pub fn spawn_pdf_workers(
 
 fn pdf_worker_loop(
     worker_id: usize,
-    customer_rx: Receiver<DecodedCustomer>,
+    enriched_rx: Receiver<EnrichedWork>,
     pdf_tx: Sender<PdfArtifact>,
     rendered: std::sync::Arc<AtomicUsize>,
 ) -> Result<()> {
-    while let Ok(customer) = customer_rx.recv() {
-        let customer_id = customer.id.clone();
-        let bytes = render_pdf(&customer).with_context(|| {
-            format!("PDF render failed for customer id={customer_id} (pdf worker {worker_id})")
+    while let Ok(work) = enriched_rx.recv() {
+        let customer_id = work.customer.id.clone();
+        let queue_id = work.queue.id;
+        let cif = work.queue.cif.clone();
+        let bytes = render_pdf(&work.customer).with_context(|| {
+            format!("PDF render failed queue_id={queue_id} cif={cif} (pdf worker {worker_id})")
         })?;
 
         pdf_tx
-            .send(PdfArtifact { customer_id, bytes })
+            .send(PdfArtifact {
+                queue_id,
+                cif,
+                customer_id,
+                bytes,
+            })
             .map_err(|_| anyhow::anyhow!("PDF channel closed (writer stage exited early)"))?;
 
         let n = rendered.fetch_add(1, Ordering::Relaxed) + 1;
