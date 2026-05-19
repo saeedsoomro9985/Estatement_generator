@@ -191,6 +191,7 @@ fn run() -> Result<()> {
         args.queue_batch_size,
         args.poll_interval_ms,
         args.chunk_size.map(|c| c.max(args.sql_batch_size as usize)),
+        args.sql_batch_size as usize,
     );
 
     let result = run_queue_pipeline(cfg)?;

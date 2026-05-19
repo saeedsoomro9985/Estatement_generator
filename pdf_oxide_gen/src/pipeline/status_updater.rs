@@ -1,4 +1,4 @@
-//! Stage 5: SQL status updates (single connection loop).
+//! Stage 5: batched SQL status updates (single connection, fewer round-trips).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -31,18 +31,20 @@ pub enum StatusJob {
 
 pub fn spawn_status_updater(
     sql: SqlConfig,
+    sql_batch_size: usize,
     status_rx: Receiver<StatusJob>,
     completed: Arc<AtomicUsize>,
     failed: Arc<AtomicUsize>,
 ) -> JoinHandle<Result<()>> {
     thread::Builder::new()
         .name("sql-status".into())
-        .spawn(move || status_loop(sql, status_rx, completed, failed))
+        .spawn(move || status_loop(sql, sql_batch_size, status_rx, completed, failed))
         .expect("spawn status updater")
 }
 
 fn status_loop(
     sql: SqlConfig,
+    sql_batch_size: usize,
     status_rx: Receiver<StatusJob>,
     completed: Arc<AtomicUsize>,
     failed: Arc<AtomicUsize>,
@@ -50,32 +52,60 @@ fn status_loop(
     let rt = Runtime::new().context("tokio runtime (status updater)")?;
     let mut client = rt.block_on(sql::connect(&sql))?;
 
-    eprintln!("[pdf-oxide] [sql-status] started");
+    let batch_cap = sql_batch_size.max(1).min(sql::SQL_UPDATE_CHUNK);
+    let mut success_ids: Vec<i64> = Vec::with_capacity(batch_cap);
+    let mut retry_ids: Vec<i64> = Vec::new();
+
+    eprintln!("[pdf-oxide] [sql-status] started | flush_batch={batch_cap}");
+
+    let flush_success =
+        |client: &mut sql::SqlClient, buf: &mut Vec<i64>, completed: &AtomicUsize| -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        let n = rt.block_on(sql::mark_generated_batch(client, buf))?;
+        completed.fetch_add(n, Ordering::Relaxed);
+        eprintln!(
+            "[pdf-oxide] [sql-status] batch generated {n} row(s) in {:.3}s",
+            perf::secs(start.elapsed())
+        );
+        buf.clear();
+        Ok(())
+    };
+
+    let flush_retry = |client: &mut sql::SqlClient, buf: &mut Vec<i64>| -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        let n = rt.block_on(sql::mark_retry_pending_batch(client, buf))?;
+        eprintln!(
+            "[pdf-oxide] [sql-status] batch retry {n} row(s) in {:.3}s",
+            perf::secs(start.elapsed())
+        );
+        buf.clear();
+        Ok(())
+    };
 
     while let Ok(job) = status_rx.recv() {
-        let start = Instant::now();
-        match &job {
+        match job {
             StatusJob::Success {
                 queue_id,
                 cif,
-                file_path,
+                file_path: _,
                 file_name,
             } => {
-                if let Err(e) = rt.block_on(sql::mark_generated(&mut client, *queue_id)) {
-                    eprintln!(
-                        "[pdf-oxide] [sql-status] ERROR mark_generated queue_id={queue_id} cif={cif}: {e:#}"
-                    );
-                    failed.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    completed.fetch_add(1, Ordering::Relaxed);
-                    if completed.load(Ordering::Relaxed) % 100 == 0 {
+                success_ids.push(queue_id);
+                if success_ids.len() >= batch_cap {
+                    if let Err(e) = flush_success(&mut client, &mut success_ids, &completed) {
                         eprintln!(
-                            "[pdf-oxide] [sql-status] generated={} | last queue_id={queue_id} file={file_name}",
-                            completed.load(Ordering::Relaxed)
+                            "[pdf-oxide] [sql-status] ERROR batch generated (last queue_id={queue_id} cif={cif}): {e:#}"
                         );
+                        failed.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                let _ = (file_path, start);
+                let _ = file_name;
             }
             StatusJob::Failure {
                 queue_id,
@@ -85,18 +115,25 @@ fn status_loop(
                 retry,
             } => {
                 eprintln!(
-                    "[pdf-oxide] [sql-status] failure | stage={stage} queue_id={:?} cif={cif}: {message}",
-                    queue_id
+                    "[pdf-oxide] [sql-status] failure | stage={stage} queue_id={queue_id:?} cif={cif}: {message}"
                 );
-                if *retry {
+                if retry {
                     if let Some(id) = queue_id {
-                        let _ = rt.block_on(sql::mark_retry_pending(&mut client, *id));
+                        retry_ids.push(id);
+                        if retry_ids.len() >= batch_cap {
+                            let _ = flush_retry(&mut client, &mut retry_ids);
+                        }
                     }
                 }
                 failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
+
+    if let Err(e) = flush_success(&mut client, &mut success_ids, &completed) {
+        eprintln!("[pdf-oxide] [sql-status] ERROR final flush generated: {e:#}");
+    }
+    let _ = flush_retry(&mut client, &mut retry_ids);
 
     eprintln!(
         "[pdf-oxide] [sql-status] finished | completed={} failed={}",

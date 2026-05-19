@@ -53,9 +53,9 @@ function buildMssqlConnectionString(): string {
 }
 
 const DEFAULT_MACHINE_ID = process.env.MACHINE_ID ?? "PSG-BSD-SAEED1";
-const QUEUE_BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE) || 100;
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 500;
-const MSSQL_BATCH_SIZE = Number(process.env.MSSQL_BATCH_SIZE) || 50;
+const QUEUE_BATCH_SIZE = Number(process.env.QUEUE_BATCH_SIZE) || 200;
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 200;
+const MSSQL_BATCH_SIZE = Number(process.env.MSSQL_BATCH_SIZE) || 100;
 
 /** PDFs written by pdf_oxide_gen use this prefix. */
 const OXIDE_PDF_PREFIX = "OXIDE-";
@@ -203,7 +203,7 @@ async function startServer() {
       const mongoCollection = process.env.MONGODB_COLLECTION ?? "Statements";
       const outputDirAbs = path.resolve(outputDir);
       fs.mkdirSync(outputDirAbs, { recursive: true });
-      const channelCap = 500;
+      const channelCap = Math.max(512, QUEUE_BATCH_SIZE * 4);
       const machineId = String(bodyMachineId ?? DEFAULT_MACHINE_ID);
       const mssqlUrl = buildMssqlConnectionString();
       const maxRecords = Number(totalCount) || 0;

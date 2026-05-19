@@ -10,6 +10,9 @@ pub const STATUS_PENDING: i32 = 109;
 pub const STATUS_PROCESSING: i32 = 103;
 pub const STATUS_GENERATED: i32 = 101;
 
+/// Max IDs per `IN (...)` batch update (fewer round-trips to SQL Server).
+pub const SQL_UPDATE_CHUNK: usize = 100;
+
 #[derive(Debug, Clone)]
 pub struct QueueItem {
     pub id: i64,
@@ -95,32 +98,58 @@ INNER JOIN cte ON q.Id = cte.Id;
 }
 
 pub async fn mark_generated(client: &mut SqlClient, queue_id: i64) -> Result<()> {
-    client
-        .execute(
-            r#"
-UPDATE dbo.Stmt_Request_Queue
-SET GeneratedStatus = @P1, GeneratedAt = SYSUTCDATETIME()
-WHERE Id = @P2
-"#,
-            &[&STATUS_GENERATED, &queue_id],
-        )
-        .await
-        .context("mark_generated")?;
+    mark_generated_batch(client, std::slice::from_ref(&queue_id)).await?;
     Ok(())
 }
 
-/// Return row to pending for retry after transient failure.
+/// Batch-complete rows (one round-trip per chunk instead of per PDF).
+pub async fn mark_generated_batch(client: &mut SqlClient, ids: &[i64]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut total = 0usize;
+    for chunk in ids.chunks(SQL_UPDATE_CHUNK) {
+        let id_list = chunk
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE dbo.Stmt_Request_Queue SET GeneratedStatus = {STATUS_GENERATED}, GeneratedAt = SYSUTCDATETIME() WHERE Id IN ({id_list})"
+        );
+        client
+            .execute(sql, &[])
+            .await
+            .with_context(|| format!("mark_generated_batch chunk len={}", chunk.len()))?;
+        total += chunk.len();
+    }
+    Ok(total)
+}
+
 pub async fn mark_retry_pending(client: &mut SqlClient, queue_id: i64) -> Result<()> {
-    client
-        .execute(
-            r#"
-UPDATE dbo.Stmt_Request_Queue
-SET GeneratedStatus = @P1, MachineId = NULL, ProcessingStartedAt = NULL
-WHERE Id = @P2
-"#,
-            &[&STATUS_PENDING, &queue_id],
-        )
-        .await
-        .context("mark_retry_pending")?;
+    mark_retry_pending_batch(client, std::slice::from_ref(&queue_id)).await?;
     Ok(())
+}
+
+pub async fn mark_retry_pending_batch(client: &mut SqlClient, ids: &[i64]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut total = 0usize;
+    for chunk in ids.chunks(SQL_UPDATE_CHUNK) {
+        let id_list = chunk
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE dbo.Stmt_Request_Queue SET GeneratedStatus = {STATUS_PENDING}, MachineId = NULL, ProcessingStartedAt = NULL WHERE Id IN ({id_list})"
+        );
+        client
+            .execute(sql, &[])
+            .await
+            .with_context(|| format!("mark_retry_pending_batch chunk len={}", chunk.len()))?;
+        total += chunk.len();
+    }
+    Ok(total)
 }

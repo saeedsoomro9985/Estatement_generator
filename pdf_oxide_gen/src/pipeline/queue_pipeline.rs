@@ -31,6 +31,7 @@ pub struct QueuePipelineConfig {
     pub mongo_fetch_workers: usize,
     pub pdf_workers: usize,
     pub writer_threads: usize,
+    pub sql_batch_size: usize,
 }
 
 #[derive(Debug)]
@@ -95,6 +96,7 @@ pub fn run_queue_pipeline(config: QueuePipelineConfig) -> Result<QueuePipelineRe
 
     let status_handle = status_updater::spawn_status_updater(
         config.sql.clone(),
+        config.sql_batch_size,
         status_rx,
         Arc::clone(&sql_completed),
         Arc::clone(&sql_failed),
@@ -117,7 +119,7 @@ pub fn run_queue_pipeline(config: QueuePipelineConfig) -> Result<QueuePipelineRe
         Arc::clone(&rendered),
     );
 
-    let mongo_handles = mongo_fetch::spawn_mongo_fetch_workers(
+    let mongo_handle = mongo_fetch::spawn_mongo_fetch_pool(
         config.mongo_fetch_workers,
         config.mongo.clone(),
         queue_rx,
@@ -143,10 +145,9 @@ pub fn run_queue_pipeline(config: QueuePipelineConfig) -> Result<QueuePipelineRe
         .join()
         .map_err(|_| anyhow::anyhow!("queue producer panicked"))??;
 
-    for h in mongo_handles {
-        h.join()
-            .map_err(|_| anyhow::anyhow!("mongo fetch worker panicked"))??;
-    }
+    mongo_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("mongo fetch pool panicked"))??;
     drop(enriched_tx);
 
     for h in pdf_handles {
@@ -209,9 +210,18 @@ pub fn queue_config_from_args(
     queue_batch_size: i32,
     poll_interval_ms: u64,
     channel_capacity: Option<usize>,
+    sql_batch_size: usize,
 ) -> QueuePipelineConfig {
     let cpus = workers.max(1);
-    let cap = channel_capacity.unwrap_or(512).clamp(64, 10_000);
+    let qbatch = queue_batch_size.clamp(1, 10_000) as usize;
+    let cap = channel_capacity
+        .unwrap_or(qbatch.saturating_mul(4))
+        .clamp(128, 20_000);
+  // IO-bound Mongo + SQL claim; CPU-bound PDF rendering uses most cores.
+    let mongo_workers = (cpus * 2).clamp(4, 32);
+    let pdf_workers = cpus.clamp(2, 32);
+    let writer_threads = (cpus / 2).clamp(2, 8);
+
     QueuePipelineConfig {
         sql,
         mongo,
@@ -220,8 +230,9 @@ pub fn queue_config_from_args(
         queue_batch_size: queue_batch_size.clamp(1, 10_000),
         poll_interval_ms,
         channel_capacity: cap,
-        mongo_fetch_workers: cpus.min(8).max(2),
-        pdf_workers: cpus.saturating_sub(1).max(1),
-        writer_threads: 2,
+        mongo_fetch_workers: mongo_workers,
+        pdf_workers,
+        writer_threads,
+        sql_batch_size: sql_batch_size.max(1),
     }
 }

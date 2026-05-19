@@ -16,6 +16,10 @@ BEGIN
         CreatedAt DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET()
     );
     CREATE INDEX IX_Stmt_Request_Queue_GeneratedStatus_Id
-        ON dbo.Stmt_Request_Queue (GeneratedStatus, Id);
+        ON dbo.Stmt_Request_Queue (GeneratedStatus, Id)
+        INCLUDE (CIF, Frequency);
 END
 GO
+
+-- MongoDB (run in mongosh on EStatements.Statements):
+-- db.Statements.createIndex({ "customer.cif": 1, "generatedAt": -1 })
