@@ -477,7 +477,7 @@ export default function App() {
                   Statement Count
                 </label>
                 <div className="flex gap-2">
-                  {[10, 100, 250, 500].map(val => (
+                  {[10, 100, 250, 500, 5000, 25000, 50000].map(val => (
                     <button
                       key={val}
                       onClick={() => setTestCount(val)}
