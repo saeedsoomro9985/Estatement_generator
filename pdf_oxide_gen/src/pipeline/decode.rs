@@ -9,13 +9,13 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use mongodb::bson;
 
-use crate::customer::{map_statement, Customer};
+use crate::customer::{map_statement, Statement};
 use crate::perf::PipelineTimings;
 use crate::pipeline::producer::RawBson;
 use crate::statement::StatementDocument;
 
 /// Mapped customer ready for PDF rendering.
-pub type DecodedCustomer = Customer;
+pub type DecodedCustomer = Statement;
 
 pub fn spawn_decode_workers(
     worker_count: usize,

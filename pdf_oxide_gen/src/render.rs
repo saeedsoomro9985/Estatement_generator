@@ -1,571 +1,818 @@
 ﻿use anyhow::Result;
 
-use crate::customer::{fmt_money, Customer};
+use crate::customer::Statement;
 use crate::pdf_primitives::*;
-// â”€â”€ PDF renderer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Render one Customer â†’ Vec<u8> (PDF bytes), matching the Python layout exactly.
-pub fn render_pdf(customer: &Customer) -> Result<Vec<u8>> {
-    let mut doc = Document::new();
-    doc.set_compression(true); // equivalent to setPageCompression(1)
+const ROW_H: f32 = 12.0;
+const HDR_H: f32 = 18.0;
+const LABEL_SIZE: f32 = 10.0;
+const TABLE_SIZE: f32 = 6.0;
+const NAV_SIZE: f32 = 11.0;
 
-    let col_w = PAGE_W - CX - 15.0;
-    let content_bottom = PAGE_H - CONTENT_BOTTOM_MARGIN;
-
-    // Destination names
-    let dest_summary = "AV_SUMMARY";
-    let acc_dests: Vec<String> = customer
-        .accounts
-        .iter()
-        .map(|a| format!("AV_ACC_{}", a.account_number))
-        .collect();
-    let tdr_dests: Vec<String> = customer
-        .tdr
-        .iter()
-        .map(|t| format!("AV_TDR_{}", t.tdr_number))
-        .collect();
-
-    let period_str = if !customer.period_from.is_empty() || !customer.period_to.is_empty() {
-        format!("Period: {} to {}", customer.period_from, customer.period_to)
-    } else {
-        String::new()
-    };
-
-    // Sidebar short labels (mirrors Python pre-compute)
-    let acc_shorts: Vec<String> = customer
-        .accounts
-        .iter()
-        .take(8)
-        .map(|a| {
-            if a.account_number.len() > 9 {
-                format!("...{}", &a.account_number[a.account_number.len() - 9..])
-            } else {
-                a.account_number.clone()
+/// Count account transaction pages (same pagination rules as the render loop).
+fn count_account_pages(stmt: &Statement) -> usize {
+    let mut total = 0usize;
+    for acc in &stmt.accounts {
+        if acc.transactions.is_empty() {
+            total += 1;
+            continue;
+        }
+        let mut row_idx = 0usize;
+        let mut y = TX_TABLE_TOP + HDR_H;
+        let mut pages = 1usize;
+        loop {
+            while row_idx < acc.transactions.len() && y + ROW_H <= CONTENT_BOTTOM {
+                y += ROW_H;
+                row_idx += 1;
             }
-        })
-        .collect();
-    let tdr_shorts: Vec<String> = customer
-        .tdr
-        .iter()
-        .take(5)
-        .map(|t| {
-            if t.tdr_number.len() > 9 {
-                format!("...{}", &t.tdr_number[t.tdr_number.len() - 9..])
-            } else {
-                t.tdr_number.clone()
+            if row_idx >= acc.transactions.len() {
+                break;
             }
-        })
-        .collect();
-
-    // â”€â”€ Helpers operating on a ContentBuilder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    /// Filled rect helper (top-down coords)
-    fn filled_rect(b: &mut ContentBuilder, x: f32, y: f32, w: f32, h: f32, color: Color) {
-        b.set_fill_color(color);
-        b.fill_rect(Rect::new(x, PAGE_H - y - h, w, h));
+            pages += 1;
+            y = TX_TABLE_TOP + HDR_H;
+        }
+        total += pages;
     }
-
-    /// Text helper (top-down y, baseline placed at y)
-    fn draw_text(
-        b: &mut ContentBuilder,
-        x: f32,
-        y: f32,
-        text: &str,
-        font: Font,
-        size: f32,
-        color: Color,
-        align: TextAlign,
-        max_w: f32,
-    ) {
-        b.set_fill_color(color);
-        b.set_font(font, size);
-        let ry = PAGE_H - y;
-        match align {
-            TextAlign::Center => b.draw_text_centered(x + max_w / 2.0, ry, text),
-            TextAlign::Right  => b.draw_text_right(x + max_w, ry, text),
-            _                 => b.draw_string(x, ry, text),
-        }
-    }
-
-    /// Horizontal line helper (top-down y)
-    fn hline(b: &mut ContentBuilder, x: f32, y: f32, length: f32, color: Color, lw: f32) {
-        b.set_stroke_color(color);
-        b.set_line_width(lw);
-        let ry = PAGE_H - y;
-        b.draw_line(Line::new(x, ry, x + length, ry));
-    }
-
-    /// Diamond Avanza logo (mirrors _draw_diamond_logo)
-    fn draw_diamond(b: &mut ContentBuilder, x: f32, y: f32, size: f32) {
-        let half = size / 2.0;
-        // Outer teal diamond
-        b.set_fill_color(c_teal());
-        b.fill_polygon(&[
-            (x + half,  PAGE_H - y),
-            (x + size,  PAGE_H - (y + half)),
-            (x + half,  PAGE_H - (y + size)),
-            (x,         PAGE_H - (y + half)),
-        ]);
-        // Inner teal2 diamond
-        let inner = size * 0.38;
-        let ih = inner / 2.0;
-        let ix = x + half - ih;
-        let iy = y + half - ih;
-        b.set_fill_color(c_teal2());
-        b.fill_polygon(&[
-            (ix + ih,    PAGE_H - iy),
-            (ix + inner, PAGE_H - (iy + ih)),
-            (ix + ih,    PAGE_H - (iy + inner)),
-            (ix,         PAGE_H - (iy + ih)),
-        ]);
-        // White "A"
-        b.set_fill_color(c_white());
-        b.set_font(Font::HelveticaBold, (size * 0.40) as f32);
-        b.draw_text_centered(x + half, PAGE_H - (y + size * 0.28), "A");
-    }
-
-    /// Header bar chart image (mirrors _draw_header_image)
-    fn draw_header_image(b: &mut ContentBuilder, x: f32, y: f32, w: f32, h: f32) {
-        // Background stripes
-        filled_rect(b, x, y, w, h, c_dnavy());
-        let stripe_colors = [c_1a3355(), c_19304f(), c_172e4c()];
-        let sw = w / 3.0;
-        for (i, &ref col) in stripe_colors.iter().enumerate() {
-            filled_rect(b, x + i as f32 * sw, y, sw, h, col.clone());
-        }
-
-        // Bars
-        let bars: &[(f32, f32, fn() -> Color)] = &[
-            (0.04, 0.38, c_2e6db4), (0.13, 0.55, c_3a8fd4),
-            (0.22, 0.72, c_teal),   (0.31, 0.50, c_3a8fd4),
-            (0.40, 0.83, c_teal),   (0.49, 0.65, c_5ab0e8),
-            (0.58, 0.90, c_teal),   (0.67, 0.75, c_5ab0e8),
-            (0.76, 0.95, c_7dc8f7),
-        ];
-        let bar_w = w * 0.075;
-        let usable_h = h * 0.76;
-        let mut pts: Vec<(f32, f32)> = Vec::new();
-
-        for &(bx_f, bh_f, color_fn) in bars {
-            let bh = usable_h * bh_f;
-            let bx = x + w * bx_f;
-            let by = y + h - bh - 6.0;
-            filled_rect(b, bx, by, bar_w, bh, color_fn());
-            filled_rect(b, bx, by, bar_w, 1.5, c_white());
-            pts.push((bx + bar_w / 2.0, by));
-        }
-
-        // Gold trend line through bars 0,2,4,6,8
-        let trend: Vec<(f32, f32)> = [0, 2, 4, 6, 8]
-            .iter()
-            .map(|&i| pts[i])
-            .collect();
-        b.set_stroke_color(c_gold());
-        b.set_line_width(1.8);
-        for i in 0..trend.len() - 1 {
-            let (x1, y1) = trend[i];
-            let (x2, y2) = trend[i + 1];
-            b.draw_line(Line::new(x1, PAGE_H - y1, x2, PAGE_H - y2));
-        }
-        let (px, py) = trend[trend.len() - 1];
-        b.set_fill_color(c_gold());
-        b.fill_circle(Circle::new(px, PAGE_H - py, 3.0));
-
-        // "FINANCIAL ANALYTICS" label
-        draw_text(b, x + 2.0, y + h - 8.0, "FINANCIAL ANALYTICS",
-            Font::HelveticaBold, 5.5, c_lblue(), TextAlign::Center, w - 4.0);
-    }
-
-    /// Social icon box (mirrors _draw_social_icon)
-    fn draw_social_icon(
-        b: &mut ContentBuilder, x: f32, y: f32, label: &str, color: Color,
-    ) {
-        let (iw, ih) = (26.0_f32, 19.0_f32);
-        filled_rect(b, x, y, iw, ih, color.clone());
-        filled_rect(b, x, y, iw, 2.0, c_white());
-        filled_rect(b, x, y + 2.0, iw, ih - 2.0, color);
-        draw_text(b, x, y + 5.0, label,
-            Font::HelveticaBold, 7.0, c_white(), TextAlign::Center, iw);
-    }
-
-    /// Full static chrome (header, footer, sidebar) â€” mirrors _build_static_form
-    fn draw_static_chrome(
-        b: &mut ContentBuilder,
-        cust_name: &str,
-        period_str: &str,
-        page_num: usize,
-    ) {
-        // â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        filled_rect(b, 0.0, 0.0, PAGE_W, HEADER_H, c_navy());
-        let logo_panel_w = 195.0;
-        filled_rect(b, 0.0, 0.0, logo_panel_w, HEADER_H, c_dnavy());
-
-        draw_diamond(b, 10.0, (HEADER_H - 34.0) / 2.0, 34.0);
-
-        draw_text(b, 53.0, 20.0, "AVANZA SOLUTIONS",
-            Font::HelveticaBold, 13.5, c_white(), TextAlign::Left, 0.0);
-        draw_text(b, 53.0, 36.0, "PVT. LTD.",
-            Font::HelveticaBold, 8.0, c_teal(), TextAlign::Left, 0.0);
-        draw_text(b, 53.0, 48.0, "www.avanzasolutions.com",
-            Font::Helvetica, 6.0, c_lblue(), TextAlign::Left, 0.0);
-        draw_text(b, 53.0, 57.0, "info@avanzasolutions.com",
-            Font::Helvetica, 6.0, c_lblue(), TextAlign::Left, 0.0);
-
-        // Teal divider
-        filled_rect(b, logo_panel_w, 0.0, 3.0, HEADER_H, c_teal());
-
-        // Centre "BANK STATEMENT"
-        let mid_x = logo_panel_w + 10.0;
-        let mid_w = 178.0;
-        draw_text(b, mid_x, 16.0, "BANK STATEMENT",
-            Font::HelveticaBold, 17.0, c_white(), TextAlign::Center, mid_w);
-        hline(b, mid_x + 10.0, 37.0, mid_w - 20.0, c_teal(), 0.8);
-
-        // Dynamic customer name + period
-        if !cust_name.is_empty() {
-            draw_text(b, mid_x, 41.0, cust_name,
-                Font::HelveticaBold, 8.0, c_white(), TextAlign::Center, mid_w);
-        }
-        if !period_str.is_empty() {
-            draw_text(b, mid_x, 54.0, period_str,
-                Font::Helvetica, 6.5, c_lblue(), TextAlign::Center, mid_w);
-        }
-
-        // Right chart panel
-        let img_x = logo_panel_w + 3.0 + mid_w + 12.0;
-        draw_header_image(b, img_x, 4.0, PAGE_W - img_x - 2.0, HEADER_H - 8.0);
-
-        // Teal bottom strip
-        filled_rect(b, 0.0, HEADER_H - 3.0, PAGE_W, 3.0, c_teal());
-
-        // â”€â”€ Footer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        let fy = PAGE_H - FOOTER_H;
-        filled_rect(b, 0.0, fy, PAGE_W, FOOTER_H, c_navy());
-        filled_rect(b, 0.0, fy, PAGE_W, 2.0, c_teal());
-
-        draw_text(b, 12.0, fy + 8.0, "AVANZA SOLUTIONS PVT. LTD.",
-            Font::HelveticaBold, 7.0, c_white(), TextAlign::Left, 0.0);
-        draw_text(b, 12.0, fy + 19.0, "Karachi, Pakistan  |  Tel: +92-21-111-282-692",
-            Font::Helvetica, 6.0, c_lblue(), TextAlign::Left, 0.0);
-        draw_text(b, 12.0, fy + 29.0,
-            "This is a system-generated statement. No signature required.",
-            Font::Helvetica, 6.0, c_lblue(), TextAlign::Left, 0.0);
-
-        // Page number
-        draw_text(b, 0.0, fy + 19.0,
-            &format!("Page {page_num}"),
-            Font::Helvetica, 6.5, c_lblue(), TextAlign::Right, PAGE_W - 5.0);
-
-        // Social icons
-        let socials: &[(&str, fn() -> Color)] = &[
-            ("f", c_fb), ("in", c_li), ("tw", c_tw), ("yt", c_yt), ("wa", c_wa),
-        ];
-        let mut xi = PAGE_W - socials.len() as f32 * 30.0 - 8.0;
-        for &(label, color_fn) in socials {
-            draw_social_icon(b, xi, fy + 11.0, label, color_fn());
-            xi += 30.0;
-        }
-
-        // â”€â”€ Sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        let sb_y = HEADER_H;
-        let sb_h = PAGE_H - HEADER_H - FOOTER_H;
-        filled_rect(b, 0.0, sb_y, SIDEBAR_W, sb_h, c_sidebar());
-        filled_rect(b, 0.0, sb_y, 3.0, sb_h, c_teal());
-
-        draw_text(b, 8.0, sb_y + 12.0, "NAVIGATE",
-            Font::HelveticaBold, 6.5, c_navy(), TextAlign::Left, SIDEBAR_W - 8.0);
-        hline(b, 8.0, sb_y + 23.0, SIDEBAR_W - 16.0, c_teal(), 0.5);
-
-        draw_text(b, 8.0, PAGE_H - FOOTER_H - 16.0, "AVANZA",
-            Font::HelveticaBold, 6.0, c_teal(), TextAlign::Center, SIDEBAR_W - 8.0);
-    }
-
-    /// Sidebar navigation links
-    fn draw_sidebar_links(
-        b: &mut ContentBuilder,
-        acc_shorts: &[String],
-        tdr_shorts: &[String],
-        acc_dests: &[String],
-        tdr_dests: &[String],
-    ) {
-        let sb_y = HEADER_H;
-        let mut ny = sb_y + 30.0;
-
-        draw_text(b, 10.0, ny, "> Summary",
-            Font::HelveticaBold, 6.5, c_blue(), TextAlign::Left, SIDEBAR_W - 10.0);
-        b.add_internal_link("AV_SUMMARY",
-            Rect::new(3.0, PAGE_H - ny + 2.0, SIDEBAR_W - 3.0, 11.0));
-        ny += 13.0;
-
-        draw_text(b, 8.0, ny, "ACCOUNTS",
-            Font::HelveticaBold, 6.0, c_mgray(), TextAlign::Left, SIDEBAR_W - 8.0);
-        ny += 10.0;
-
-        for (i, short) in acc_shorts.iter().enumerate() {
-            draw_text(b, 10.0, ny, &format!("> {short}"),
-                Font::Helvetica, 6.0, c_blue(), TextAlign::Left, SIDEBAR_W - 10.0);
-            if let Some(dest) = acc_dests.get(i) {
-                b.add_internal_link(dest,
-                    Rect::new(3.0, PAGE_H - ny + 2.0, SIDEBAR_W - 3.0, 11.0));
-            }
-            ny += 10.0;
-        }
-
-        ny += 4.0;
-        draw_text(b, 8.0, ny, "TDR",
-            Font::HelveticaBold, 6.0, c_mgray(), TextAlign::Left, SIDEBAR_W - 8.0);
-        ny += 10.0;
-
-        for (i, short) in tdr_shorts.iter().enumerate() {
-            draw_text(b, 10.0, ny, &format!("> {short}"),
-                Font::Helvetica, 6.0, c_blue(), TextAlign::Left, SIDEBAR_W - 10.0);
-            if let Some(dest) = tdr_dests.get(i) {
-                b.add_internal_link(dest,
-                    Rect::new(3.0, PAGE_H - ny + 2.0, SIDEBAR_W - 3.0, 11.0));
-            }
-            ny += 10.0;
-        }
-    }
-
-    /// Table header row (mirrors _draw_table_header)
-    fn draw_table_header(b: &mut ContentBuilder, y: f32, col_w: f32) -> f32 {
-        filled_rect(b, CX, y, col_w, 16.0, c_navy());
-        filled_rect(b, CX, y, 3.0, 16.0, c_teal());
-        filled_rect(b, CX + col_w - 3.0, y, 3.0, 16.0, c_gold());
-        let hdr = format!("{:<12} {:<33} {:>12} {:>12}", "Date", "Description", "Amount", "Balance");
-        draw_text(b, CX + 5.0, y + 3.5, &hdr,
-            Font::CourierBold, 7.0, c_white(), TextAlign::Left, col_w - 10.0);
-        y + 16.0
-    }
-
-    /// Summary table header
-    fn tbl_header(b: &mut ContentBuilder, y: f32, col1: &str, col2: &str, col_w: f32) -> f32 {
-        filled_rect(b, CX, y, col_w, 17.0, c_navy());
-        filled_rect(b, CX, y, 3.0, 17.0, c_teal());
-        filled_rect(b, CX + col_w - 3.0, y, 3.0, 17.0, c_gold());
-        draw_text(b, CX + 8.0, y + 4.5, col1,
-            Font::HelveticaBold, 7.5, c_white(), TextAlign::Left, 220.0);
-        draw_text(b, CX + 230.0, y + 4.5, col2,
-            Font::HelveticaBold, 7.5, c_white(), TextAlign::Right, col_w - 245.0);
-        y + 17.0
-    }
-
-    /// Summary table row
-    fn tbl_row(
-        b: &mut ContentBuilder, y: f32, col1: &str, col2: &str, idx: usize,
-        dest: Option<&str>, col_w: f32,
-    ) -> f32 {
-        if idx % 2 == 0 {
-            filled_rect(b, CX, y, col_w, 17.0, c_ltblue());
-            filled_rect(b, CX, y, 3.0, 17.0, c_teal());
-        } else {
-            filled_rect(b, CX, y, 3.0, 17.0, c_cdcef());
-        }
-        draw_text(b, CX + 8.0, y + 4.5, col1,
-            Font::Helvetica, 8.0, c_blue(), TextAlign::Left, 220.0);
-        draw_text(b, CX + 230.0, y + 4.5, col2,
-            Font::HelveticaBold, 8.0, c_dgray(), TextAlign::Right, col_w - 245.0);
-        if let Some(d) = dest {
-            b.add_internal_link(d,
-                Rect::new(CX, PAGE_H - y - 17.0, col_w, 17.0));
-        }
-        y + 17.0
-    }
-
-    /// Section title (blue bar + bold text)
-    fn section_title(b: &mut ContentBuilder, y: f32, title: &str, _col_w: f32) -> f32 {
-        filled_rect(b, CX, y, 4.0, 14.0, c_navy());
-        draw_text(b, CX + 10.0, y, title,
-            Font::HelveticaBold, 9.5, c_navy(), TextAlign::Left, 300.0);
-        y + 18.0
-    }
-
-    // â”€â”€ Build pages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    let mut page_num: usize = 1;
-
-    // Closure to add one full page (chrome + sidebar + bookmark if any)
-    let add_page = |doc: &mut Document,
-                    page_num: usize,
-                    bookmark_dest: Option<&str>,
-                    cust_name: &str,
-                    period_str: &str,
-                    acc_shorts: &[String],
-                    tdr_shorts: &[String],
-                    acc_dests: &[String],
-                    tdr_dests: &[String]| -> ContentBuilder
-    {
-        let mut page = Page::new(PAGE_W, PAGE_H);
-        if let Some(dest) = bookmark_dest {
-            page.set_named_destination(dest);
-        }
-        let mut b = page.content_builder();
-        draw_static_chrome(&mut b, cust_name, period_str, page_num);
-        draw_sidebar_links(&mut b, acc_shorts, tdr_shorts, acc_dests, tdr_dests);
-        b
-    };
-
-    // â”€â”€ Page 1 â€” Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    {
-        let mut page = Page::new(PAGE_W, PAGE_H);
-        page.set_named_destination(dest_summary);
-        let mut b = page.content_builder();
-        draw_static_chrome(&mut b, &customer.name, &period_str, page_num);
-        draw_sidebar_links(&mut b, &acc_shorts, &tdr_shorts, &acc_dests, &tdr_dests);
-
-        let mut y = CONTENT_TOP;
-        filled_rect(&mut b, CX, y, col_w, 40.0, c_ltblue());
-        filled_rect(&mut b, CX, y, 4.0, 40.0, c_teal());
-        filled_rect(&mut b, CX + col_w - 4.0, y, 4.0, 40.0, c_gold());
-        draw_text(&mut b, CX + 10.0, y + 6.0, "Statement Summary",
-            Font::HelveticaBold, 12.0, c_navy(), TextAlign::Left, col_w - 20.0);
-        draw_text(&mut b, CX + 10.0, y + 21.0, &customer.name,
-            Font::Helvetica, 8.5, c_dgray(), TextAlign::Left, col_w - 20.0);
-        draw_text(&mut b, CX + 10.0, y + 31.0, &customer.address,
-            Font::Helvetica, 7.0, c_mgray(), TextAlign::Left, col_w - 20.0);
-        y += 52.0;
-
-        y = section_title(&mut b, y, "Accounts", col_w);
-        y = tbl_header(&mut b, y, "Account Number", "Balance (PKR)", col_w);
-        for (i, acc) in customer.accounts.iter().enumerate() {
-            y = tbl_row(&mut b, y, &acc.account_number,
-                &fmt_money(acc.balance), i, acc_dests.get(i).map(String::as_str), col_w);
-        }
-        filled_rect(&mut b, CX, y, col_w, 2.0, c_navy());
-        y += 22.0;
-
-        y = section_title(&mut b, y, "Term Deposits (TDR)", col_w);
-        y = tbl_header(&mut b, y, "TDR Number", "Principal (PKR)", col_w);
-        for (i, td) in customer.tdr.iter().enumerate() {
-            y = tbl_row(&mut b, y, &td.tdr_number,
-                &fmt_money(td.principal_amount), i,
-                tdr_dests.get(i).map(String::as_str), col_w);
-        }
-        filled_rect(&mut b, CX, y, col_w, 2.0, c_navy());
-
-        page.set_content(b);
-        doc.add_page(page);
-    }
-
-    // â”€â”€ Account detail pages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    for (ai, acc) in customer.accounts.iter().enumerate() {
-        page_num += 1;
-        let mut page = Page::new(PAGE_W, PAGE_H);
-        page.set_named_destination(&acc_dests[ai]);
-        let mut b = page.content_builder();
-        draw_static_chrome(&mut b, &customer.name, &period_str, page_num);
-        draw_sidebar_links(&mut b, &acc_shorts, &tdr_shorts, &acc_dests, &tdr_dests);
-
-        let mut y = CONTENT_TOP;
-        filled_rect(&mut b, CX, y, col_w, 32.0, c_ltblue());
-        filled_rect(&mut b, CX, y, 4.0, 32.0, c_teal());
-        draw_text(&mut b, CX + 10.0, y + 5.0,
-            &format!("Account: {}", acc.account_number),
-            Font::HelveticaBold, 10.5, c_navy(), TextAlign::Left, col_w - 20.0);
-        draw_text(&mut b, CX + 10.0, y + 19.0,
-            &format!("Type: {}   |   Balance: PKR {}", acc.account_type, fmt_money(acc.balance)),
-            Font::Helvetica, 7.5, c_mgray(), TextAlign::Left, col_w - 20.0);
-        y += 42.0;
-
-        // Transaction table (with page overflow)
-        y = draw_table_header(&mut b, y, col_w);
-        let mut section_top = y;
-
-        let rows: Vec<String> = acc.transactions.iter().map(|tx| {
-            let desc = if tx.description.len() > 32 {
-                tx.description[..32].to_string()
-            } else {
-                tx.description.clone()
-            };
-            format!("{:<12} {:<33} {:>12.2} {:>12.2}",
-                tx.date, desc, tx.amount, tx.balance)
-        }).collect();
-
-        for (i, row) in rows.iter().enumerate() {
-            if y + 12.0 > content_bottom {
-                // Close current section
-                filled_rect(&mut b, CX, section_top, 3.0, y - section_top, c_teal());
-                filled_rect(&mut b, CX, y, col_w, 2.0, c_navy());
-                page.set_content(b);
-                doc.add_page(page);
-
-                page_num += 1;
-                page = Page::new(PAGE_W, PAGE_H);
-                b = page.content_builder();
-                draw_static_chrome(&mut b, &customer.name, &period_str, page_num);
-                draw_sidebar_links(&mut b, &acc_shorts, &tdr_shorts, &acc_dests, &tdr_dests);
-                y = draw_table_header(&mut b, CONTENT_TOP, col_w);
-                section_top = y;
-            }
-            if i % 2 == 0 {
-                filled_rect(&mut b, CX, y, col_w, 12.0, c_ltblue());
-            }
-            draw_text(&mut b, CX + 5.0, y + 2.5, row,
-                Font::Courier, 6.8, c_dgray(), TextAlign::Left, col_w - 10.0);
-            y += 12.0;
-        }
-        filled_rect(&mut b, CX, section_top, 3.0, y - section_top, c_teal());
-        filled_rect(&mut b, CX, y, col_w, 2.0, c_navy());
-        page.set_content(b);
-        doc.add_page(page);
-    }
-
-    // â”€â”€ TDR detail pages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    for (ti, td) in customer.tdr.iter().enumerate() {
-        page_num += 1;
-        let mut page = Page::new(PAGE_W, PAGE_H);
-        page.set_named_destination(&tdr_dests[ti]);
-        let mut b = page.content_builder();
-        draw_static_chrome(&mut b, &customer.name, &period_str, page_num);
-        draw_sidebar_links(&mut b, &acc_shorts, &tdr_shorts, &acc_dests, &tdr_dests);
-
-        let mut y = CONTENT_TOP;
-        filled_rect(&mut b, CX, y, col_w, 32.0, c_ltblue());
-        filled_rect(&mut b, CX, y, 4.0, 32.0, c_teal());
-        filled_rect(&mut b, CX + col_w - 3.0, y, 3.0, 32.0, c_gold());
-        draw_text(&mut b, CX + 10.0, y + 5.0,
-            &format!("Term Deposit: {}", td.tdr_number),
-            Font::HelveticaBold, 10.5, c_navy(), TextAlign::Left, col_w - 20.0);
-        draw_text(&mut b, CX + 10.0, y + 19.0,
-            &format!("Rate: {}%   |   Maturity: {}   |   Principal: PKR {}",
-                td.interest_rate, td.maturity_date, fmt_money(td.principal_amount)),
-            Font::Helvetica, 7.5, c_mgray(), TextAlign::Left, col_w - 20.0);
-        y += 42.0;
-
-        y = draw_table_header(&mut b, y, col_w);
-        let mut section_top = y;
-
-        for (i, tx) in td.transactions.iter().enumerate() {
-            if y + 12.0 > content_bottom {
-                filled_rect(&mut b, CX, section_top, 3.0, y - section_top, c_teal());
-                filled_rect(&mut b, CX, y, col_w, 2.0, c_navy());
-                page.set_content(b);
-                doc.add_page(page);
-
-                page_num += 1;
-                page = Page::new(PAGE_W, PAGE_H);
-                b = page.content_builder();
-                draw_static_chrome(&mut b, &customer.name, &period_str, page_num);
-                draw_sidebar_links(&mut b, &acc_shorts, &tdr_shorts, &acc_dests, &tdr_dests);
-                y = draw_table_header(&mut b, CONTENT_TOP, col_w);
-                section_top = y;
-            }
-            if i % 2 == 0 {
-                filled_rect(&mut b, CX, y, col_w, 12.0, c_ltblue());
-            }
-            let desc = if tx.description.len() > 32 { &tx.description[..32] } else { &tx.description };
-            let row = format!("{:<12} {:<33} {:>12.2} {:>12.2}",
-                tx.date, desc, tx.amount, tx.balance);
-            draw_text(&mut b, CX + 5.0, y + 2.5, &row,
-                Font::Courier, 6.8, c_dgray(), TextAlign::Left, col_w - 10.0);
-            y += 12.0;
-        }
-        filled_rect(&mut b, CX, section_top, 3.0, y - section_top, c_teal());
-        filled_rect(&mut b, CX, y, col_w, 2.0, c_navy());
-        page.set_content(b);
-        doc.add_page(page);
-    }
-
-    Ok(doc.save_to_bytes()?)
+    total
 }
 
+/// Count TDR detail pages (same pagination rules as `render_tdr_pages`).
+fn count_tdr_pages(stmt: &Statement) -> usize {
+    let mut total = 0usize;
+    for td in &stmt.term_deposits {
+        if td.certificates.is_empty() {
+            continue;
+        }
+        let mut idx = 0usize;
+        while idx < td.certificates.len() {
+            let mut y = TDR_TABLE_TOP + HDR_H + TDR_SECTION_BANNER_H;
+            let mut pages = 1usize;
+            loop {
+                while idx < td.certificates.len() {
+                    if idx > 0
+                        && td.certificates[idx].cert_type_label
+                            != td.certificates[idx - 1].cert_type_label
+                    {
+                        let need = TDR_SECTION_BANNER_H + ROW_H;
+                        if y + need > TDR_PAGE_BOTTOM {
+                            break;
+                        }
+                        y += TDR_SECTION_BANNER_H;
+                    }
+                    if y + ROW_H > TDR_PAGE_BOTTOM {
+                        break;
+                    }
+                    y += ROW_H;
+                    idx += 1;
+                }
+                if idx >= td.certificates.len() {
+                    break;
+                }
+                pages += 1;
+                y = TDR_TABLE_TOP + HDR_H + TDR_SECTION_BANNER_H;
+            }
+            total += pages;
+        }
+    }
+    total
+}
+
+pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
+    // Load/rasterize the 3 templates once (parallel); disk cache makes later runs fast.
+    preload_templates()?;
+
+    let mut writer = new_pdf_writer();
+
+    let summary_page = 0usize;
+    let accounts_page = 2usize;
+    let account_pages = count_account_pages(stmt);
+    let tdr_pages = count_tdr_pages(stmt);
+    let term_deposits_page = if tdr_pages > 0 {
+        accounts_page + account_pages
+    } else if account_pages > 0 {
+        accounts_page
+    } else {
+        summary_page
+    };
+    
+    let nav = NavTargets {
+        summary: summary_page,
+        accounts: accounts_page,
+        term_deposits: term_deposits_page,
+    };
+
+    // ── Page 1: summary template — account + TDR summary tables ──
+    {
+        let mut b = ContentBuilder::new();
+        draw_sidebar(&mut b, true, false);
+        draw_customer_block(&mut b, stmt);
+
+        let acc_cols = ["Product", "Account Number", "IBAN", "Currency", "FCY Balance", "Balance"];
+        let acc_widths = [72.0, 85.0, 110.0, 52.0, 58.0, 73.0];
+        
+        draw_text(
+            &mut b,
+            CX,
+            ACC_SUMMARY_TOP - 10.0,
+            "Account Summary",
+            Font::Bold,
+            11.0,
+            c_gray_bar(),
+            TextAlign::Left,
+            200.0,
+        );
+        let mut y = draw_mbl_table(
+            &mut b,
+            CX,
+            ACC_SUMMARY_TOP,
+            &acc_cols,
+            &acc_widths,
+            stmt.account_summary
+                .iter()
+                .map(|r| {
+                    vec![
+                        r.product.as_str(),
+                        r.account_number.as_str(),
+                        r.iban.as_str(),
+                        r.currency.as_str(),
+                        r.fcy_balance.as_str(),
+                        r.balance.as_str(),
+                    ]
+                })
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
+
+        let tdr_cols = [
+            "Certificate Type",
+            "No Of Certificate",
+            "IBAN",
+            "Currency",
+            "FCY Balance",
+            "Balance",
+        ];
+        let tdr_widths = [58.0, 58.0, 130.0, 42.0, 72.0, 90.0];
+        if y + 40.0 > CONTENT_BOTTOM {
+            y = TDR_SUMMARY_TOP;
+        } else {
+            y += 60.0;
+        }
+
+        draw_text(
+            &mut b,
+            CX,
+            y - 10.0,
+            "Term Deposit Summary",
+            Font::Bold,
+            11.0,
+            c_gray_bar(),
+            TextAlign::Left,
+            250.0,
+        );
+        draw_mbl_table(
+            &mut b,
+            CX,
+            y,
+            &tdr_cols,
+            &tdr_widths,
+            stmt.tdr_summary
+                .iter()
+                .map(|r| {
+                    vec![
+                        r.certificate_type.as_str(),
+                        r.number_of_certificates.as_str(),
+                        r.iban.as_str(),
+                        r.currency.as_str(),
+                        r.fcy_balance.as_str(),
+                        r.balance.as_str(),
+                    ]
+                })
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
+
+        // draw_text(
+        //     &mut b,
+        //     CX,
+        //     80.0,
+        //     &format!(
+        //         "Rupees equivalent aggregate balance {}  {}",
+        //         stmt.to_date, sum_balances(stmt)
+        //     ),
+        //     Font::Regular,
+        //     LABEL_SIZE,
+        //     c_black(),
+        //     TextAlign::Left,
+        //     TABLE_W,
+        // );
+
+        write_content_page(&mut writer, TPL_SUMMARY, &b, None, nav)?;
+    }
+
+    // ── Page 2: summary template + MessageForYou image (DrawAdvert) ──
+    {
+        let mut b = ContentBuilder::new();
+        draw_sidebar(&mut b, true, false);
+        draw_customer_block(&mut b, stmt);
+        let msg_bytes = load_message_for_you_image()?;
+        let img_y = PAGE_H - MSG_IMG_TOP - MSG_IMG_H;
+        write_content_page(
+            &mut writer,
+            TPL_SUMMARY,
+            &b,
+            Some((msg_bytes, MSG_IMG_X, img_y, MSG_IMG_W, MSG_IMG_H)),
+            nav,
+        )?;
+    }
+
+    // ── Account transaction pages (Account template) ──
+    for acc in &stmt.accounts {
+        let mut b = ContentBuilder::new();
+        draw_sidebar(&mut b, false, true);
+        draw_account_header(&mut b, acc);
+
+        let cols = [
+            "Date",
+            "Value Date",
+            "Doc No",
+            "Particular",
+            "Debit",
+            "Credit",
+            "Balance",
+        ];
+        let tx_x = table_x();
+        let tx_w = full_table_width();
+        let base = [1.0, 1.0, 1.0, 3.5, 1.0, 1.0, 1.2];
+        let sum: f32 = base.iter().sum();
+
+        let widths: Vec<f32> = base.iter()
+            .map(|w| (w / sum) * tx_w)
+            .collect();
+        let mut row_idx = 0usize;
+        let mut y = TX_TABLE_TOP;
+        let mut first_page = true;
+    
+
+        loop {
+            if !first_page {
+                write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+                b = ContentBuilder::new();
+                draw_sidebar(&mut b, false, true);
+                draw_account_header(&mut b, acc);
+            }
+            first_page = false;
+
+            draw_mbl_table_header(&mut b, tx_x, y, &cols, &widths, Some(tx_w));
+            y += HDR_H;
+
+            while row_idx < acc.transactions.len() && y + ROW_H <= CONTENT_BOTTOM {
+                let tx = &acc.transactions[row_idx];
+                draw_mbl_data_row(
+                    &mut b,
+                    tx_x,
+                    y,
+                    &[
+                        tx.date.as_str(),
+                        tx.value_date.as_str(),
+                        tx.doc_no.as_str(),
+                        tx.particular.as_str(),
+                        tx.debit.as_str(),
+                        tx.credit.as_str(),
+                        tx.balance.as_str(),
+                    ],
+                    &widths,
+                    row_idx,
+                    Some(tx_w),
+                );
+                y += ROW_H;
+                row_idx += 1;
+            }
+
+            if row_idx >= acc.transactions.len() {
+                break;
+            }
+            y = TX_TABLE_TOP;
+        }
+
+        if !acc.closing_balance.is_empty() {
+            draw_text(
+                &mut b,
+                CX + widths[0] + widths[1] + widths[2],
+                y + 4.0,
+                "<=Closing Balance=>",
+                Font::Bold,
+                TABLE_SIZE,
+                c_black(),
+                TextAlign::Left,
+                120.0,
+            );
+            draw_text(
+                &mut b,
+                CX + TABLE_W - 50.0,
+                y + 4.0,
+                &acc.closing_balance,
+                Font::Regular,
+                TABLE_SIZE,
+                c_black(),
+                TextAlign::Right,
+                50.0,
+            );
+        }
+
+        write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+    }
+
+    // ── Term deposit pages (Accounts_TermDeposit template) ──
+    for td in &stmt.term_deposits {
+        render_tdr_pages(td, &mut writer, nav)?;
+    }
+
+    finish_pdf(writer)
+}
+
+fn sum_balances(stmt: &Statement) -> String {
+    let mut total = 0.0_f64;
+    for r in &stmt.account_summary {
+        if r.product == "Total" {
+            return r.balance.clone();
+        }
+        if let Ok(v) = r.balance.replace(',', "").parse::<f64>() {
+            total += v;
+        }
+    }
+    format!("{total:.2}")
+}
+
+// ── Drawing helpers (top-down Y converted to PDF bottom-up) ──
+
+fn td_y(y_top: f32) -> f32 {
+    PAGE_H - y_top
+}
+
+fn draw_text(
+    b: &mut ContentBuilder,
+    x: f32,
+    y_top: f32,
+    text: &str,
+    font: Font,
+    size: f32,
+    color: Color,
+    align: TextAlign,
+    max_w: f32,
+) {
+    b.set_fill_color(color);
+    b.set_font(font, size);
+    let y = td_y(y_top);
+    match align {
+        TextAlign::Center => b.draw_text_centered(x + max_w / 2.0, y, text),
+        TextAlign::Right => b.draw_text_right(x + max_w, y, text),
+        _ => b.draw_string(x, y, text),
+    }
+}
+
+fn filled_rect(b: &mut ContentBuilder, x: f32, y_top: f32, w: f32, h: f32, color: Color) {
+    b.set_fill_color(color);
+    b.fill_rect(Rect::new(x, td_y(y_top + h), w, h));
+}
+
+fn hline(b: &mut ContentBuilder, x: f32, y_top: f32, length: f32, color: Color, lw: f32) {
+    b.set_stroke_color(color);
+    b.set_line_width(lw);
+    let y = td_y(y_top);
+    b.draw_line(Line::new(x, y, x + length, y));
+}
+
+fn vline(b: &mut ContentBuilder, x: f32, y_top: f32, h: f32, color: Color, lw: f32) {
+    b.set_stroke_color(color);
+    b.set_line_width(lw);
+    b.draw_line(Line::new(x, td_y(y_top), x, td_y(y_top + h)));
+}
+
+/// Left sidebar labels (SUMMARY / ACCOUNTS / TERM DEPOSITS) — PdfSharp template positions.
+fn draw_sidebar(b: &mut ContentBuilder, on_summary: bool, on_accounts: bool) {
+    let items = [
+        ("SUMMARY", 140.0, on_summary),
+        ("ACCOUNTS", 170.0, on_accounts),
+        ("TERM DEPOSITS", 200.0, !on_summary && !on_accounts),
+    ];
+    for (label, y, active) in items {
+        draw_text(
+            b,
+            SIDEBAR_X,
+            y,
+            label,
+            if active {
+                Font::Bold
+            } else {
+                Font::Regular
+            },
+            NAV_SIZE,
+            c_black(),
+            TextAlign::Left,
+            80.0,
+        );
+        draw_text(
+            b,
+            SIDEBAR_X + 95.0, // same horizontal position for all
+            y,
+            ">>",
+            if active {
+                Font::Bold
+            } else {
+                Font::Regular
+            },
+            NAV_SIZE,
+            c_black(),
+            TextAlign::Left,
+            20.0,
+        );
+    }
+}
+
+fn draw_customer_block(b: &mut ContentBuilder, stmt: &Statement) {
+    let pairs = [
+        ("Customer Name", &stmt.customer_name, 125.0, 150.0, 170.0),
+        ("From Date", &stmt.from_date, 250.0, 150.0, 170.0),
+        ("To Date", &stmt.to_date, 375.0, 150.0, 170.0),
+        ("Customer Id", &stmt.customer_id, 125.0, 200.0, 220.0),
+    ];
+    for (label, value, x_label, y_l, y_v) in pairs {
+        draw_text(
+            b,
+            x_label,
+            y_l,
+            label,
+            Font::Bold,
+            LABEL_SIZE,
+            c_black(),
+            TextAlign::Left,
+            120.0,
+        );
+        draw_text(
+            b,
+            x_label,
+            y_v,
+            value,
+            Font::Regular,
+            LABEL_SIZE,
+            c_dark_gray(),
+            TextAlign::Left,
+            200.0,
+        );
+    }
+    // if !stmt.cif.is_empty() {
+    //     draw_text(
+    //         b,
+    //          250.0,
+    //         200.0,
+    //         "CIF",
+    //         Font::Bold,
+    //         LABEL_SIZE,
+    //         c_black(),
+    //         TextAlign::Left,
+    //         40.0,
+    //     );
+    //     draw_text(
+    //         b,
+    //         250.0,
+    //         220.0,
+    //         &stmt.cif,
+    //         Font::Regular,
+    //         LABEL_SIZE,
+    //         c_black(),
+    //         TextAlign::Left,
+    //         120.0,
+    //     );
+    // }
+}
+
+fn draw_account_header(b: &mut ContentBuilder, acc: &crate::customer::AccountDetail) {
+    let rows = [
+        ("Title", &acc.title, 125.0, 130.0, 145.0),
+        ("Account Type", &acc.account_type, 125.0, 170.0, 185.0),
+        ("Account Number", &acc.account_number, 240.0, 170.0, 185.0),
+        ("IBAN", &acc.iban, 365.0, 170.0, 185.0),
+        ("Currency", &acc.currency, 125.0, 210.0, 225.0),
+        ("From Date", &acc.from_date, 240.0, 210.0, 225.0),
+        ("To Date", &acc.to_date, 365.0, 210.0, 225.0),
+        ("Branch", &acc.branch, 125.0, 250.0, 265.0),
+    ];
+    for (label, value, x, y_l, y_v) in rows {
+        draw_text(
+            b,
+            x,
+            y_l,
+            label,
+            Font::Bold,
+            LABEL_SIZE,
+            c_black(),
+            TextAlign::Left,
+            100.0,
+        );
+        draw_text(
+            b,
+            x,
+            y_v,
+            value,
+            Font::Regular,
+            LABEL_SIZE,
+            c_black(),
+            TextAlign::Left,
+            200.0,
+        );
+    }
+}
+
+/// Paginate TDR rows like PdfSharp `AddTDRTableWrapper` (break at y >= 700, new page at y=190).
+fn render_tdr_pages(
+    td: &crate::customer::TermDepositDetail,
+    writer: &mut PdfWriter,
+    nav: NavTargets,
+) -> Result<()> {
+    let cols = [
+        "Certificate No",
+        "Profit Option",
+        "Start Date",
+        "Maturity Date",
+        "Tenure",
+        "Currency",
+        "FCY Balance",
+        "Amount",
+    ];
+    let w = 56.0;
+    let widths = [w; 8];
+
+    let mut idx = 0usize;
+    while idx < td.certificates.len() {
+        let mut b = ContentBuilder::new();
+        draw_sidebar(&mut b, false, false);
+        draw_tdr_header(&mut b, td);
+
+        let mut y = TDR_TABLE_TOP;
+        draw_mbl_table_header(&mut b, CX, y, &cols, &widths, None);
+        y += HDR_H;
+
+        let cert_type = &td.certificates[idx].cert_type_label;
+        draw_tdr_section_banner(&mut b, td, cert_type, y);
+        y += TDR_SECTION_BANNER_H;
+
+        while idx < td.certificates.len() {
+            if idx > 0 && td.certificates[idx].cert_type_label != td.certificates[idx - 1].cert_type_label {
+                let need = TDR_SECTION_BANNER_H + ROW_H;
+                if y + need > TDR_PAGE_BOTTOM {
+                    break;
+                }
+                draw_tdr_section_banner(&mut b, td, &td.certificates[idx].cert_type_label, y);
+                y += TDR_SECTION_BANNER_H;
+            }
+
+            if y + ROW_H > TDR_PAGE_BOTTOM {
+                break;
+            }
+
+            let cert = &td.certificates[idx];
+            draw_mbl_data_row(
+                &mut b,
+                CX,
+                y,
+                &[
+                    cert.certificate_no.as_str(),
+                    cert.profit_option.as_str(),
+                    cert.start_date.as_str(),
+                    cert.maturity_date.as_str(),
+                    cert.tenure.as_str(),
+                    cert.currency.as_str(),
+                    cert.fcy_balance.as_str(),
+                    cert.amount.as_str(),
+                ],
+                &widths,
+                idx,
+                None,
+            );
+            y += ROW_H;
+            idx += 1;
+        }
+
+        write_content_page(writer, TPL_TDR, &b, None, nav)?;
+    }
+    Ok(())
+}
+
+fn draw_tdr_section_banner(
+    b: &mut ContentBuilder,
+    td: &crate::customer::TermDepositDetail,
+    cert_type: &str,
+    y: f32,
+) {
+    filled_rect(b, CX, y, TABLE_W, 14.0, c_mbl_mint());
+    draw_text(
+        b,
+        CX + 4.0,
+        y + 8.0,
+        &format!("{} - {}", td.title, td.cert_no),
+        Font::Bold,
+        7.0,
+        c_black(),
+        TextAlign::Left,
+        TABLE_W,
+    );
+    filled_rect(b, CX, y + 14.0, TABLE_W, 14.0, c_mbl_mint());
+    draw_text(
+        b,
+        CX + 4.0,
+        y + 20.0,
+        cert_type,
+        Font::Bold,
+        7.0,
+        c_black(),
+        TextAlign::Left,
+        TABLE_W,
+    );
+}
+
+fn draw_tdr_header(b: &mut ContentBuilder, td: &crate::customer::TermDepositDetail) {
+    draw_text(
+        b,
+        125.0,
+        150.0,
+        "Title",
+        Font::Bold,
+        LABEL_SIZE,
+        c_black(),
+        TextAlign::Left,
+        60.0,
+    );
+    draw_text(
+        b,
+        125.0,
+        170.0,
+        &td.title,
+        Font::Regular,
+        LABEL_SIZE,
+        c_black(),
+        TextAlign::Left,
+        250.0,
+    );
+    draw_text(
+        b,
+        240.0,
+        150.0,
+        "As Of Position",
+        Font::Bold,
+        LABEL_SIZE,
+        c_black(),
+        TextAlign::Left,
+        100.0,
+    );
+    draw_text(
+        b,
+        240.0,
+        170.0,
+        &td.as_of_date,
+        Font::Regular,
+        LABEL_SIZE,
+        c_black(),
+        TextAlign::Left,
+        120.0,
+    );
+}
+
+fn draw_mbl_table_header(
+    b: &mut ContentBuilder,
+    x: f32,
+    y_top: f32,
+    headers: &[&str],
+    widths: &[f32],
+    tx_w: Option<f32>,
+) {
+    let tx_w = tx_w.unwrap_or(TABLE_W);
+    filled_rect(b, x, y_top, tx_w, HDR_H, c_purple());
+
+    const CELL_PADDING: f32 = 4.0;
+    const RIGHT_PADDING: f32 = 18.0;
+
+    // Match row alignment
+    let aligns = [
+        TextAlign::Left,
+        TextAlign::Left,
+        TextAlign::Left,
+        TextAlign::Left,
+        TextAlign::Right,
+        TextAlign::Right,
+        TextAlign::Right,
+    ];
+
+    let mut cx = x;
+
+    for (((hdr, &w), align), _) in headers
+        .iter()
+        .zip(widths.iter())
+        .zip(aligns.iter())
+        .zip(0..)
+    {
+        let effective_width = match align {
+            TextAlign::Right => w - RIGHT_PADDING,
+            _ => w - (CELL_PADDING * 2.0),
+        };
+
+        draw_text(
+            b,
+            cx + CELL_PADDING,
+            y_top + 7.0,
+            hdr,
+            Font::Bold,
+            TABLE_SIZE,
+            c_white(),
+            *align,
+            effective_width,
+        );
+
+        vline(b, cx, y_top, HDR_H, c_dark_gray(), 0.5);
+
+        cx += w;
+    }
+
+    // Right border
+    vline(b, x + tx_w, y_top, HDR_H, c_dark_gray(), 0.5);
+
+    // Top and bottom border
+    hline(b, x, y_top, tx_w, c_dark_gray(), 0.5);
+    hline(b, x, y_top + HDR_H, tx_w, c_dark_gray(), 0.5);
+}
+
+fn draw_mbl_data_row(
+    b: &mut ContentBuilder,
+    x: f32,
+    y_top: f32,
+    cells: &[&str],
+    widths: &[f32],
+    row_idx: usize,
+    tx_w: Option<f32>,
+) {
+     let tx_w = tx_w.unwrap_or(TABLE_W);
+    // Explicit alignment per column
+    let aligns = [
+        TextAlign::Left,   // Date
+        TextAlign::Left,   // Value Date
+        TextAlign::Left,   // Doc No
+        TextAlign::Left,   // Particular
+        TextAlign::Right,  // Debit
+        TextAlign::Right,  // Credit
+        TextAlign::Right,  // Balance
+    ];
+
+    const CELL_PADDING: f32 = 4.0;
+
+    let mut cx = x;
+
+    for (((cell, &w), align), idx) in cells
+        .iter()
+        .zip(widths.iter())
+        .zip(aligns.iter())
+        .zip(0..)
+    {
+        let effective_width = match align {
+            TextAlign::Right => w - 18.0, // reduce right alignment area
+            _ => w - (CELL_PADDING * 2.0),
+        };
+
+        draw_text(
+            b,
+            cx + CELL_PADDING,
+            y_top + 7.0,
+            cell,
+            Font::Regular,
+            TABLE_SIZE,
+            c_black(),
+            *align,
+            effective_width,
+        );
+
+        cx += w;
+    }
+
+    // Left border
+    vline(b, x, y_top, ROW_H, c_gray_bar(), 0.5);
+    // Right border
+    vline(b, x + tx_w, y_top, ROW_H, c_gray_bar(), 0.5);
+
+    // Bottom border
+    hline(b, x, y_top + ROW_H, tx_w, c_gray_bar(), 0.5);
+}
+
+fn draw_mbl_table(
+    b: &mut ContentBuilder,
+    x: f32,
+    y_top: f32,
+    headers: &[&str],
+    widths: &[f32],
+    rows: &[Vec<&str>],
+) -> f32 {
+    draw_mbl_table_header(b, x, y_top, headers, widths, None);
+    let mut y = y_top + HDR_H;
+    for (i, row) in rows.iter().enumerate() {
+        draw_mbl_data_row(b, x, y, row, widths, i, None);
+        y += ROW_H;
+    }
+    y
+}

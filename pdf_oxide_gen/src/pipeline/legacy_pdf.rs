@@ -36,7 +36,7 @@ fn legacy_pdf_loop(
     rendered: std::sync::Arc<AtomicUsize>,
 ) -> Result<()> {
     while let Ok(customer) = customer_rx.recv() {
-        let customer_id = customer.id.clone();
+        let customer_id = customer.customer_id.clone();
         let bytes = render_pdf(&customer).with_context(|| {
             format!("PDF render failed id={customer_id} (worker {worker_id})")
         })?;

@@ -43,7 +43,7 @@ fn pdf_worker_loop(
     rendered: std::sync::Arc<AtomicUsize>,
 ) -> Result<()> {
     while let Ok(work) = enriched_rx.recv() {
-        let customer_id = work.customer.id.clone();
+        let customer_id = work.customer.customer_id.clone();
         let queue_id = work.queue.id;
         let cif = work.queue.cif.clone();
         let bytes = render_pdf(&work.customer).with_context(|| {

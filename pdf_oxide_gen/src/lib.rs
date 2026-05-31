@@ -7,7 +7,7 @@ pub mod pipeline;
 pub mod render;
 pub mod statement;
 
-pub use customer::{map_statement, Customer};
+pub use customer::{map_statement, Statement};
 pub use mongo::MongoConfig;
 pub use render::render_pdf;
 pub use statement::StatementDocument;

@@ -13,7 +13,7 @@ use mongodb::Client;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::customer::{map_statement, Customer};
+use crate::customer::{map_statement, Statement};
 use crate::mongo::MongoConfig;
 use crate::perf::PipelineTimings;
 use crate::pipeline::status_updater::StatusJob;
@@ -23,7 +23,7 @@ use crate::sql::QueueItem;
 #[derive(Debug, Clone)]
 pub struct EnrichedWork {
     pub queue: QueueItem,
-    pub customer: Customer,
+    pub customer: Statement,
 }
 
 /// One async worker pool (multi-thread tokio) instead of N separate runtimes.
@@ -157,7 +157,7 @@ async fn fetch_by_cif(
     client: &Client,
     mongo: &MongoConfig,
     cif: &str,
-) -> Result<Option<(Customer, std::time::Duration, std::time::Duration)>> {
+) -> Result<Option<(Statement, std::time::Duration, std::time::Duration)>> {
     let collection = client
         .database(&mongo.database)
         .collection::<Document>(&mongo.collection);
