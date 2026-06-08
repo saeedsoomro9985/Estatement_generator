@@ -1,6 +1,6 @@
 ﻿use anyhow::Result;
 
-use crate::customer::Statement;
+use crate::customer::{Statement, fmt_money};
 use crate::pdf_primitives::*;
 
 const ROW_H: f32 = 12.0;
@@ -100,6 +100,19 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
         accounts: accounts_page,
         term_deposits: term_deposits_page,
     };
+
+    let grand_tdr_amount: f64 = stmt
+        .term_deposits
+        .iter()
+        .flat_map(|td| td.certificates.iter())
+        .map(|c| c.amount.replace(',', "").parse::<f64>().unwrap_or(0.0))
+        .sum();
+
+    let grand_tdr_certificates: usize = stmt
+        .term_deposits
+        .iter()
+        .map(|td| td.certificates.len())
+        .sum();
 
     // ── Page 1: summary template — account + TDR summary tables ──
     {
@@ -294,37 +307,53 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
             y = TX_TABLE_TOP;
         }
 
-        if !acc.closing_balance.is_empty() {
-            draw_text(
-                &mut b,
-                CX + widths[0] + widths[1] + widths[2],
-                y + 4.0,
-                "<=Closing Balance=>",
-                Font::Bold,
-                TABLE_SIZE,
-                c_black(),
-                TextAlign::Left,
-                120.0,
-            );
-            draw_text(
-                &mut b,
-                CX + TABLE_W - 50.0,
-                y + 4.0,
-                &acc.closing_balance,
-                Font::Regular,
-                TABLE_SIZE,
-                c_black(),
-                TextAlign::Right,
-                50.0,
-            );
-        }
+        let box_y = y + ACCOUNT_BOX_MARGIN;
 
-        write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+        if box_y + ACCOUNT_BOX_H <= CONTENT_BOTTOM {
+            draw_account_stats_box(
+                &mut b,
+                box_y,
+                acc,
+            );
+
+            write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+        } else {
+            // write last transaction page first
+            write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+
+            let mut stats_page = ContentBuilder::new();
+
+            draw_sidebar(&mut stats_page, false, true);
+            draw_account_header(&mut stats_page, acc);
+
+            draw_account_stats_box(
+                &mut stats_page,
+                TX_TABLE_TOP,
+                acc,
+            );
+
+            write_content_page(
+                &mut writer,
+                TPL_ACCOUNT,
+                &stats_page,
+                None,
+                nav,
+            )?;
+        }
     }
 
     // ── Term deposit pages (Accounts_TermDeposit template) ──
-    for td in &stmt.term_deposits {
-        render_tdr_pages(td, &mut writer, nav)?;
+   for (idx, td) in stmt.term_deposits.iter().enumerate() {
+        let is_last_tdr = idx == stmt.term_deposits.len() - 1;
+
+        render_tdr_pages(
+            td,
+            &mut writer,
+            nav,
+            is_last_tdr,
+            grand_tdr_amount,
+            grand_tdr_certificates,
+        )?;
     }
 
     finish_pdf(writer)
@@ -523,11 +552,136 @@ fn draw_account_header(b: &mut ContentBuilder, acc: &crate::customer::AccountDet
     }
 }
 
+fn draw_account_stats_box(
+    b: &mut ContentBuilder,
+    y: f32,
+    acc: &crate::customer::AccountDetail,
+) {
+    const ROW_H: f32 = 16.0;
+
+    let x = table_x();
+    let w = full_table_width();
+    let label_w = w * 0.75;
+
+    let total_credit_count = acc
+        .transactions
+        .iter()
+        .filter(|t| {
+            let v = t.credit.replace(',', "").trim().to_string();
+            v != "0.00" && v != "0" && v != "-"
+        })
+        .count();
+
+    let total_debit_count = acc
+        .transactions
+        .iter()
+        .filter(|t| {
+            let v = t.debit.replace(',', "").trim().to_string();
+            v != "0.00" && v != "0" && v != "-"
+        })
+        .count();
+
+    let total_credit_turnover: f64 = acc
+        .transactions
+        .iter()
+        .map(|t| {
+            t.credit
+                .replace(',', "")
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        })
+        .sum();
+
+    let total_debit_turnover: f64 = acc
+        .transactions
+        .iter()
+        .map(|t| {
+            t.debit
+                .replace(',', "")
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        })
+        .sum();
+
+    let rows = [
+        (
+            "Total No. of Credit Transactions",
+            total_credit_count.to_string(),
+        ),
+        (
+            "Total No. of Debit Transactions",
+            total_debit_count.to_string(),
+        ),
+        (
+            "Total Credit Turnover",
+            fmt_money(total_credit_turnover),
+        ),
+        (
+            "Total Debit Turnover",
+            fmt_money(total_debit_turnover),
+        ),
+    ];
+
+    let total_h = ROW_H * rows.len() as f32;
+
+    hline(b, x, y, w, c_gray_bar(), 0.5,);
+    // Left border
+    vline(b, x, y, total_h, c_gray_bar(), 0.5);
+
+    // Right border
+    vline(b, x + w, y, total_h, c_gray_bar(), 0.5);
+
+    let mut row_y = y;
+
+    for (label, value) in rows {
+        draw_text(
+            b,
+            x + 6.0,
+            row_y + 10.0,
+            label,
+            Font::Regular,
+            8.0,
+            c_black(),
+            TextAlign::Left,
+            label_w,
+        );
+
+        draw_text(
+            b,
+            x + label_w,
+            row_y + 10.0,
+            &value,
+            Font::Bold,
+            8.0,
+            c_black(),
+            TextAlign::Right,
+            w - label_w - 6.0,
+        );
+
+        row_y += ROW_H;
+    }
+
+    // Bottom border only
+    hline(
+        b,
+        x,
+        y + total_h,
+        w,
+        c_gray_bar(),
+        0.5,
+    );
+}
+
 /// Paginate TDR rows like PdfSharp `AddTDRTableWrapper` (break at y >= 700, new page at y=190).
 fn render_tdr_pages(
     td: &crate::customer::TermDepositDetail,
     writer: &mut PdfWriter,
     nav: NavTargets,
+    is_last_tdr: bool,
+    grand_tdr_amount: f64,
+    grand_tdr_certificates: usize,
 ) -> Result<()> {
     let cols = [
         "Certificate No",
@@ -543,6 +697,8 @@ fn render_tdr_pages(
     let widths = [w; 8];
 
     let mut idx = 0usize;
+    let grand_box_y = TDR_PAGE_BOTTOM - GRAND_BOX_H - GRAND_BOX_MARGIN_BOTTOM;
+
     while idx < td.certificates.len() {
         let mut b = ContentBuilder::new();
         draw_sidebar(&mut b, false, false);
@@ -593,7 +749,42 @@ fn render_tdr_pages(
             idx += 1;
         }
 
-        write_content_page(writer, TPL_TDR, &b, None, nav)?;
+        let is_last_page_of_tdr = idx >= td.certificates.len();
+
+        if is_last_page_of_tdr {
+            draw_tdr_totals_box(&mut b, y, td);
+            y += TOTAL_BOX_H;
+        }
+
+        if is_last_tdr && is_last_page_of_tdr {
+            if y < grand_box_y - 10.0 {
+                draw_grand_tdr_totals_box(
+                    &mut b,
+                    grand_box_y,
+                    grand_tdr_amount,
+                    grand_tdr_certificates,
+                );
+
+                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+            } else {
+                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+
+                let mut b = ContentBuilder::new();
+                draw_sidebar(&mut b, false, false);
+                draw_tdr_header(&mut b, td);
+
+                draw_grand_tdr_totals_box(
+                    &mut b,
+                    grand_box_y,
+                    grand_tdr_amount,
+                    grand_tdr_certificates,
+                );
+
+                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+            }
+        }else {
+                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+        }
     }
     Ok(())
 }
@@ -604,29 +795,170 @@ fn draw_tdr_section_banner(
     cert_type: &str,
     y: f32,
 ) {
-    filled_rect(b, CX, y, TABLE_W, 14.0, c_mbl_mint());
-    draw_text(
+    const BANNER_ROW_H: f32 = 20.0;
+    filled_rect(b, CX, y, TABLE_W, BANNER_ROW_H, c_mbl_mint());
+     draw_text(
         b,
         CX + 4.0,
-        y + 8.0,
-        &format!("{} - {}", td.title, td.cert_no),
-        Font::Bold,
-        7.0,
+        y + 14.0,
+        &format!("{} - {}", td.title, td.account_no),
+        Font::Regular,
+        10.0,
         c_black(),
         TextAlign::Left,
         TABLE_W,
     );
-    filled_rect(b, CX, y + 14.0, TABLE_W, 14.0, c_mbl_mint());
+    
+    hline(
+        b,
+        CX,
+        y + BANNER_ROW_H,
+        TABLE_W,
+        c_black(),
+        1.0,
+    );
+
+    filled_rect(b, CX, y + BANNER_ROW_H, TABLE_W, BANNER_ROW_H, c_mbl_mint());
     draw_text(
         b,
         CX + 4.0,
-        y + 20.0,
+        y + 32.0,
         cert_type,
-        Font::Bold,
-        7.0,
+        Font::Regular,
+        10.0,
         c_black(),
         TextAlign::Left,
         TABLE_W,
+    );
+}
+
+fn draw_tdr_totals_box(
+    b: &mut ContentBuilder,
+    y: f32,
+    td: &crate::customer::TermDepositDetail,
+) {
+    const BOX_H: f32 = 18.0;
+    const LABEL_W: f32 = 250.0;
+
+    let total_amount: f64 = td
+        .certificates
+        .iter()
+        .map(|c| c.amount.replace(',', "").parse::<f64>().unwrap_or(0.0))
+        .sum();
+
+    let total_certs = td.certificates.len();
+
+    let rows = [
+        ("Total", fmt_money(total_amount)),
+        ("Number Of Certificates", total_certs.to_string()),
+    ];
+
+    let total_height = BOX_H * rows.len() as f32;
+
+    // Left border
+    vline(b, CX, y, total_height, c_gray_bar(), 0.5);
+
+    // Right border
+    vline(b, CX + TABLE_W, y, total_height, c_gray_bar(), 0.5);
+
+
+    let mut row_y = y;
+
+    for (label, value) in rows {
+
+        draw_text(
+            b,
+            CX + 4.0,
+            row_y + 12.0,
+            label,
+            Font::Bold,
+            10.0,
+            c_black(),
+            TextAlign::Left,
+            LABEL_W - 8.0,
+        );
+
+        draw_text(
+            b,
+            CX + LABEL_W + 4.0,
+            row_y + 12.0,
+            &value,
+            Font::Bold,
+            10.0,
+            c_black(),
+            TextAlign::Right,
+            TABLE_W - LABEL_W - 8.0,
+        );
+
+        row_y += BOX_H;
+    }
+    hline(
+        b,
+        CX,
+        y + total_height,
+        TABLE_W,
+        c_gray_bar(),
+        0.5,
+    );
+}
+
+fn draw_grand_tdr_totals_box(
+    b: &mut ContentBuilder,
+    y: f32,
+    total_amount: f64,
+    total_certificates: usize,
+) {
+    const BOX_H: f32 = 18.0;
+    const LABEL_W: f32 = 250.0;
+
+    let rows = [
+        ("Grand Total", fmt_money(total_amount)),
+        ("Number Of Certificates", total_certificates.to_string()),
+    ];
+
+    let total_height = BOX_H * rows.len() as f32;
+
+    hline(b, CX, y, TABLE_W, c_gray_bar(), 0.5,);
+    vline(b, CX, y, total_height, c_gray_bar(), 0.5);
+    vline(b, CX + TABLE_W, y, total_height, c_gray_bar(), 0.5);
+
+    let mut row_y = y;
+
+    for (label, value) in rows {
+        draw_text(
+            b,
+            CX + 4.0,
+            row_y + 12.0,
+            label,
+            Font::Regular,
+            10.0,
+            c_black(),
+            TextAlign::Left,
+            LABEL_W,
+        );
+
+        draw_text(
+            b,
+            CX + LABEL_W,
+            row_y + 12.0,
+            &value,
+            Font::Regular,
+            10.0,
+            c_black(),
+            TextAlign::Right,
+            TABLE_W - LABEL_W - 4.0,
+        );
+
+        row_y += BOX_H;
+    }
+
+    hline(
+        b,
+        CX,
+        y + total_height,
+        TABLE_W,
+        c_gray_bar(),
+        0.5,
     );
 }
 
@@ -700,6 +1032,7 @@ fn draw_mbl_table_header(
         TextAlign::Right,
         TextAlign::Right,
         TextAlign::Right,
+        TextAlign::Right,  // Amount
     ];
 
     let mut cx = x;
@@ -759,7 +1092,18 @@ fn draw_mbl_data_row(
         TextAlign::Right,  // Debit
         TextAlign::Right,  // Credit
         TextAlign::Right,  // Balance
+        TextAlign::Right,  // Amount (for TDR)
     ];
+
+     let is_total = cells.iter().any(|v| v.trim().eq_ignore_ascii_case("Total"));
+     let is_Opening_balance = cells.iter().any(|v| v.trim().eq_ignore_ascii_case("<=Opening Balance=>"));
+     let is_Closing_balance = cells.iter().any(|v| v.trim().eq_ignore_ascii_case("<=Closing Balance=>"));
+
+    let font = if (is_total || is_Opening_balance || is_Closing_balance)  {
+        Font::Bold
+    } else {
+        Font::Regular
+    };
 
     const CELL_PADDING: f32 = 4.0;
 
@@ -781,7 +1125,7 @@ fn draw_mbl_data_row(
             cx + CELL_PADDING,
             y_top + 7.0,
             cell,
-            Font::Regular,
+            font,
             TABLE_SIZE,
             c_black(),
             *align,

@@ -69,6 +69,7 @@ pub struct TermDepositDetail {
     pub cert_no: String,
     pub account_type: String,
     pub as_of_date: String,
+    pub account_no: String,
     pub certificates: Vec<TdrCertificateRow>,
 }
 
@@ -95,110 +96,200 @@ pub fn map_statement(rec: &StatementDocument) -> Statement {
     let summary = rec.summary.as_ref();
 
     let account_summary = summary
-        .map(|s| {
-            s.accounts
-                .iter()
-                .map(|a| AccountSummaryRow {
-                    product: String::new(),
+    .map(|s| {
+        let mut total_balance = 0.0;
+
+        let mut rows: Vec<AccountSummaryRow> = s
+            .accounts
+            .iter()
+            .map(|a| {
+                let balance = a.closing_balance.as_f64();
+                total_balance += balance;
+
+                AccountSummaryRow {
+                    product: a.product.clone().unwrap_or_default(),
                     account_number: a.account_no.clone(),
-                    iban: String::new(),
-                    currency: rec.meta.currency.clone().unwrap_or_default(),
-                    fcy_balance: String::new(),
-                    balance: fmt_money(a.closing_balance.as_f64()),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    iban: a.iban.clone().unwrap_or_default(),
+                    currency: a.currency.clone().unwrap_or_default(),
+                    fcy_balance: fmt_money(a.closing_balance_fcy.as_f64()),
+                    balance: fmt_money(balance),
+                }
+            })
+            .collect();
+
+       
+            rows.push(AccountSummaryRow {
+            product: "Total".to_string(),
+            account_number: String::new(),
+            iban: String::new(),
+            currency: rec.meta.currency.clone().unwrap_or_default(),
+            fcy_balance: String::new(),
+            balance: fmt_money(total_balance),
+        });
+
+        rows
+    })
+    .unwrap_or_default();
 
     let tdr_summary = summary
-        .map(|s| {
-            s.term_deposits
-                .iter()
-                .map(|t| TdrSummaryRow {
-                    certificate_type: String::new(),
+    .map(|s| {
+        let mut total_balance = 0.0;
+
+        let mut rows: Vec<TdrSummaryRow> = s
+            .term_deposits
+            .iter()
+            .map(|t| {
+                let balance = t.opening_balance.as_f64();
+                total_balance += balance;
+
+                TdrSummaryRow {
+                    certificate_type: t.cert_type.clone().unwrap_or_default(),
                     number_of_certificates: "1".to_string(),
-                    iban: String::new(),
-                    currency: rec.meta.currency.clone().unwrap_or_default(),
-                    fcy_balance: String::new(),
-                    balance: fmt_money(t.opening_balance.as_f64()),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    iban: t.iban.clone().unwrap_or_default(),
+                    currency: t.currency.clone().unwrap_or_else(|| {
+                        rec.meta.currency.clone().unwrap_or_default()
+                    }),
+                    fcy_balance: fmt_money(t.opening_balance_fcy.as_f64()),
+                    balance: fmt_money(balance),
+                }
+            })
+            .collect();
 
+        rows.push(TdrSummaryRow {
+            certificate_type: "Total".to_string(),
+            number_of_certificates: String::new(),
+            iban: String::new(),
+            currency: rec.meta.currency.clone().unwrap_or_default(),
+            fcy_balance: String::new(),
+            balance: fmt_money(total_balance),
+        });
+
+        rows
+    })
+    .unwrap_or_default();
+
+    
     let accounts = rec
-        .accounts
-        .iter()
-        .map(|acc| {
-            let closing_balance = summary
-                .and_then(|s| {
-                    s.accounts
-                        .iter()
-                        .find(|x| x.account_no == acc.account_no)
-                })
-                .map(|x| fmt_money(x.closing_balance.as_f64()))
-                .unwrap_or_default();
-
-            let transactions = acc
-                .transactions
+    .accounts
+    .iter()
+    .map(|acc| {
+        let summary_account = summary.and_then(|s| {
+            s.accounts
                 .iter()
-                .map(|tx| AccountTransactionRow {
-                    date: tx.transaction_date.clone(),
-                    value_date: tx.transaction_date.clone(),
-                    doc_no: String::new(),
-                    particular: tx.transaction_details.clone(),
-                    debit: fmt_money(tx.debit_amount_lc.as_f64()),
-                    credit: fmt_money(tx.credit_amount_lc.as_f64()),
-                    balance: fmt_money(tx.balance.as_f64()),
-                })
-                .collect();
+                .find(|x| x.account_no == acc.account_no)
+        });
 
-            AccountDetail {
-                title: acc.title.clone().unwrap_or_default(),
-                account_type: acc.account_type.clone(),
-                account_number: acc.account_no.clone(),
-                iban: String::new(),
-                currency: acc.currency.clone().unwrap_or_default(),
-                from_date: rec.meta.from_date.clone(),
-                to_date: rec.meta.to_date.clone(),
-                branch: String::new(),
-                opening_balance: String::new(),
-                closing_balance,
-                transactions,
-            }
-        })
-        .collect();
+        let opening_balance = summary_account
+            .map(|x| fmt_money(x.opening_balance.as_f64()))
+            .unwrap_or_default();
 
-    let term_deposits = rec
-        .term_deposits
-        .iter()
-        .map(|td| {
-            let certificates = td
-                .tdr_transactions
-                .iter()
-                .map(|tx| TdrCertificateRow {
-                    certificate_no: td.cert_no.clone(),
-                    profit_option: tx.profit_option.clone(),
-                    start_date: tx.start_date.clone(),
-                    maturity_date: tx.maturity.clone(),
-                    tenure: tx.tenure.clone(),
-                    currency: rec.meta.currency.clone().unwrap_or_default(),
-                    fcy_balance: String::new(),
-                    amount: fmt_money(tx.rupees_amount.as_f64()),
-                    cert_type_label: tx.certificate_type.clone(),
-                })
-                .collect();
+        let closing_balance = summary_account
+            .map(|x| fmt_money(x.closing_balance.as_f64()))
+            .unwrap_or_default();
 
-            TermDepositDetail {
-                title: String::new(),
-                cert_no: td.cert_no.clone(),
-                account_type: String::new(),
-                as_of_date: rec.meta.to_date.clone(),
-                certificates,
-            }
-        })
-        .collect();
+        let mut transactions: Vec<AccountTransactionRow> = acc
+            .transactions
+            .iter()
+            .map(|tx| AccountTransactionRow {
+                date: tx.transaction_date.clone(),
+                value_date: tx.transaction_date.clone(),
+                doc_no: String::new(),
+                particular: tx.transaction_details.clone(),
+                debit: fmt_money(tx.debit_amount_lc.as_f64()),
+                credit: fmt_money(tx.credit_amount_lc.as_f64()),
+                balance: fmt_money(tx.balance.as_f64()),
+            })
+            .collect();
 
+        // Opening Balance Row
+        transactions.insert(
+            0,
+            AccountTransactionRow {
+                date: rec.meta.from_date.clone(),
+                value_date: String::new(),
+                doc_no: String::new(),
+                particular: "<=Opening Balance=>".to_string(),
+                debit: String::new(),
+                credit: String::new(),
+                balance: opening_balance.clone(),
+            },
+        );
+
+        // Closing Balance Row
+        transactions.push(AccountTransactionRow {
+            date: rec.meta.to_date.clone(),
+            value_date: String::new(),
+            doc_no: String::new(),
+            particular: "<=Closing Balance=>".to_string(),
+            debit: String::new(),
+            credit: String::new(),
+            balance: closing_balance.clone(),
+        });
+
+        AccountDetail {
+            title: acc.title.clone().unwrap_or_default(),
+            account_type: acc.account_type.clone(),
+            account_number: acc.account_no.clone(),
+            iban: String::new(),
+            currency: acc.currency.clone().unwrap_or_default(),
+            from_date: rec.meta.from_date.clone(),
+            to_date: rec.meta.to_date.clone(),
+            branch: String::new(),
+            opening_balance,
+            closing_balance,
+            transactions,
+        }
+    })
+    .collect();
+
+   let term_deposits = rec
+    .term_deposits
+    .iter()
+    .map(|td| {
+        let certificates = td
+            .tdr_transactions
+            .iter()
+            .map(|tx| TdrCertificateRow {
+                certificate_no: tx
+                    .certificate_no
+                    .clone()
+                    .unwrap_or_else(|| td.cert_no.clone()),
+
+                profit_option: tx.profit_option.clone(),
+                start_date: tx.start_date.clone(),
+                maturity_date: tx.maturity.clone(),
+                tenure: tx.tenure.clone(),
+
+                currency: tx
+                    .currency
+                    .clone()
+                    .or_else(|| td.currency.clone())
+                    .or_else(|| rec.meta.currency.clone())
+                    .unwrap_or_default(),
+
+                fcy_balance: fmt_money(tx.fcy_amount.as_f64()),
+
+                amount: fmt_money(tx.rupees_amount.as_f64()),
+
+                cert_type_label: tx.certificate_type.clone(),
+            })
+            .collect();
+
+        TermDepositDetail {
+            title: td.title.clone().unwrap_or_default(),
+            cert_no: td.cert_no.clone(),
+            account_no: td.account_no.clone().unwrap_or_default(),
+            account_type: td.account_type.clone().unwrap_or_default(),
+            as_of_date: td
+                .to_date
+                .clone()
+                .unwrap_or_else(|| rec.meta.to_date.clone()),
+
+            certificates,
+        }
+    })
+    .collect();
+    
     Statement {
         customer_name: rec.customer.name.clone().unwrap_or_default(),
         customer_id: rec.customer.customer_id.clone(),

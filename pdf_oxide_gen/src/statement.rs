@@ -96,24 +96,84 @@ pub struct StatementTransaction {
 pub struct StatementTermDeposit {
     #[serde(rename = "certNo")]
     pub cert_no: String,
+
+    #[serde(default)]
+    pub title: Option<String>,
+
+    #[serde(rename = "accountType", default)]
+    pub account_type: Option<String>,
+
+    #[serde(default)]
+    pub currency: Option<String>,
+
+    #[serde(rename = "accountNo", default)]
+    pub account_no: Option<String>,
+
+    #[serde(default)]
+    pub iban: Option<String>,
+
+    #[serde(rename = "fromDate", default)]
+    pub from_date: Option<String>,
+
+    #[serde(rename = "toDate", default)]
+    pub to_date: Option<String>,
+
+    #[serde(default)]
+    pub cif: Option<String>,
+
     #[serde(rename = "tdrTransactions", default)]
     pub tdr_transactions: Vec<StatementTdrTransaction>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StatementTdrTransaction {
-    #[serde(rename = "startDate", default)]
-    pub start_date: String,
-    #[serde(rename = "certificateType", default)]
-    pub certificate_type: String,
-    #[serde(rename = "tenure", default)]
-    pub tenure: String,
+    #[serde(default)]
+    pub idpk: Option<i64>,
+
+    #[serde(rename = "accountNo", default)]
+    pub account_no: Option<String>,
+
+    #[serde(rename = "certificateNo", default)]
+    pub certificate_no: Option<String>,
+
     #[serde(rename = "profitOption", default)]
     pub profit_option: String,
-    #[serde(rename = "rupeesAmount", default)]
-    pub rupees_amount: FlexibleAmount,
+
+    #[serde(rename = "startDate", default)]
+    pub start_date: String,
+
     #[serde(default)]
     pub maturity: String,
+
+    #[serde(default)]
+    pub tenure: String,
+
+    #[serde(rename = "fcyAmount", default)]
+    pub fcy_amount: FlexibleAmount,
+
+    #[serde(rename = "rupeesAmount", default)]
+    pub rupees_amount: FlexibleAmount,
+
+    #[serde(rename = "totalCertificates", default)]
+    pub total_certificates: Option<String>,
+
+    #[serde(rename = "certificateType", default)]
+    pub certificate_type: String,
+
+    #[serde(default)]
+    pub currency: Option<String>,
+
+    #[serde(rename = "requestId", default)]
+    pub request_id: Option<String>,
+
+    #[serde(rename = "requestDetailId", default)]
+    pub request_detail_id: Option<String>,
+
+    #[serde(rename = "productNumber", default)]
+    pub product_number: Option<String>,
+
+    #[serde(default)]
+    pub iban: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -126,16 +186,134 @@ pub struct StatementSummary {
 
 #[derive(Debug, Deserialize)]
 pub struct StatementSummaryAccount {
+    #[serde(default)]
+    pub cif: Option<String>,
+
+    #[serde(default)]
+    pub product: Option<String>,
+
     #[serde(rename = "accountNo")]
     pub account_no: String,
+
+    #[serde(default)]
+    pub iban: Option<String>,
+
+    #[serde(default)]
+    pub currency: Option<String>,
+
+    #[serde(default)]
+    pub title: Option<String>,
+
+    #[serde(rename = "subProductCode", default)]
+    pub sub_product_code: Option<String>,
+
+    #[serde(rename = "segmentCode", default)]
+    pub segment_code: Option<String>,
+
+    #[serde(rename = "openingBalance", default)]
+    pub opening_balance: FlexibleAmount,
+
     #[serde(rename = "closingBalance", default)]
     pub closing_balance: FlexibleAmount,
+
+    #[serde(rename = "currentBalance", default)]
+    pub current_balance: FlexibleAmount,
+
+    #[serde(rename = "openingBalanceFcy", default)]
+    pub opening_balance_fcy: FlexibleAmount,
+
+    #[serde(rename = "closingBalanceFcy", default)]
+    pub closing_balance_fcy: FlexibleAmount,
+
+    #[serde(rename = "balanceDate", default)]
+    pub balance_date: Option<String>,
+
+    #[serde(rename = "averageBalance", default)]
+    pub average_balance: FlexibleAmount,
+
+    #[serde(rename = "accountStatus", default)]
+    pub account_status: Option<String>,
+
+    #[serde(rename = "accountType", default)]
+    pub account_type: Option<String>,
+
+    #[serde(rename = "productDescription", default)]
+    pub product_description: Option<String>,
+
+    // #[serde(default)]
+    // pub branch: Option<StatementBranch>,
+
+    // #[serde(rename = "customerBranch", default)]
+    // pub customer_branch: Option<StatementBranch>,
+
+    #[serde(rename = "requestDetailId", default)]
+    pub request_detail_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StatementSummaryTermDeposit {
+    #[serde(default)]
+    pub cif: Option<String>,
+
+    #[serde(rename = "certType", default)]
+    pub cert_type: Option<String>,
+
     #[serde(rename = "certNo")]
     pub cert_no: String,
+
+    #[serde(default)]
+    pub iban: Option<String>,
+
+    #[serde(default)]
+    pub currency: Option<String>,
+
+    #[serde(default)]
+    pub product: Option<String>,
+
+    #[serde(default)]
+    pub title: Option<String>,
+
+    #[serde(rename = "subProductCode", default)]
+    pub sub_product_code: Option<String>,
+
+    #[serde(rename = "segmentCode", default)]
+    pub segment_code: Option<String>,
+
     #[serde(rename = "openingBalance", default)]
     pub opening_balance: FlexibleAmount,
+
+    #[serde(rename = "closingBalance", default)]
+    pub closing_balance: FlexibleAmount,
+
+    #[serde(rename = "currentBalance", default)]
+    pub current_balance: FlexibleAmount,
+
+    #[serde(rename = "openingBalanceFcy", default)]
+    pub opening_balance_fcy: FlexibleAmount,
+
+    #[serde(rename = "closingBalanceFcy", default)]
+    pub closing_balance_fcy: FlexibleAmount,
+
+    #[serde(rename = "balanceDate", default)]
+    pub balance_date: Option<String>,
+
+    #[serde(rename = "averageBalance", default)]
+    pub average_balance: FlexibleAmount,
+
+    #[serde(rename = "accountStatus", default)]
+    pub account_status: Option<String>,
+
+    #[serde(rename = "accountType", default)]
+    pub account_type: Option<String>,
+
+    #[serde(rename = "productDescription", default)]
+    pub product_description: Option<String>,
+
+    // #[serde(default)]
+    // pub branch: Option<StatementBranch>,
+
+    // #[serde(rename = "customerBranch", default)]
+    // pub customer_branch: Option<StatementBranch>,
 }
+
+

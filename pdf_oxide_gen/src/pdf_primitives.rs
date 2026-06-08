@@ -468,10 +468,18 @@ pub const TX_TABLE_TOP: f32 = 280.0;
 pub const ACC_SUMMARY_TOP: f32 = 270.0;
 pub const TDR_SUMMARY_TOP: f32 = 270.0;
 
-pub const TDR_PAGE_BOTTOM: f32 = 700.0;
+pub const TDR_PAGE_BOTTOM: f32 = 780.0;
 pub const TDR_TABLE_TOP: f32 = 190.0;
 
-pub const TDR_SECTION_BANNER_H: f32 = 28.0;
+pub const TDR_SECTION_BANNER_H: f32 = 40.0;
+
+pub const TOTAL_BOX_H: f32 = 36.0; // 2 rows × 18
+pub const GRAND_BOX_H: f32 = 36.0;
+pub const GRAND_BOX_MARGIN_BOTTOM: f32 = 20.0;
+
+pub const ACCOUNT_BOX_MARGIN: f32 = 20.0;
+pub const ACCOUNT_BOX_H: f32 = 64.0; // 4 rows × 16
+
 
 pub fn full_table_width() -> f32 {
     PAGE_W - 20.0 // full usable page width
@@ -516,8 +524,9 @@ pub fn c_mbl_green() -> Color {
 }
 
 pub fn c_mbl_mint() -> Color {
-    Color::hex("#bdd4cf")
+    Color::hex("#D5DBDB")
 }
+
 
 /// Resolve report assets
 
