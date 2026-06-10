@@ -516,7 +516,7 @@ pub fn c_dark_gray() -> Color {
 }
 
 pub fn c_gray_bar() -> Color {
-    Color::hex("#808080")
+    Color::hex("#bdbdbd")
 }
 
 pub fn c_mbl_green() -> Color {
@@ -755,7 +755,7 @@ fn template_page_size_from_image(bytes: &[u8]) -> Option<(f32, f32)> {
 }
 
 fn nav_link_rect(y_top: f32) -> GRect {
-    let y = PAGE_H - y_top - NAV_LINK_H;
+    let y = PAGE_H - y_top - NAV_LINK_H + 8.0;
     GRect::new(SIDEBAR_X, y, NAV_LINK_W, NAV_LINK_H)
 }
 

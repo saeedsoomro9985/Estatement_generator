@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-
+use num_format::{ToFormattedString, Locale};
 use crate::statement::StatementDocument;
 
 /// Statement models aligned with production JSON (meta, customer, summary, accounts, termDeposits).

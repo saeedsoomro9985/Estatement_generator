@@ -3,10 +3,10 @@
 use crate::customer::{Statement, fmt_money};
 use crate::pdf_primitives::*;
 
-const ROW_H: f32 = 12.0;
-const HDR_H: f32 = 18.0;
+const ROW_H: f32 = 16.0;
+const HDR_H: f32 = 20.0;
 const LABEL_SIZE: f32 = 10.0;
-const TABLE_SIZE: f32 = 6.0;
+const TABLE_SIZE: f32 = 7.5;
 const NAV_SIZE: f32 = 11.0;
 
 /// Count account transaction pages (same pagination rules as the render loop).
@@ -1051,7 +1051,7 @@ fn draw_mbl_table_header(
         draw_text(
             b,
             cx + CELL_PADDING,
-            y_top + 7.0,
+            y_top + 11.0,
             hdr,
             Font::Bold,
             TABLE_SIZE,
@@ -1123,7 +1123,7 @@ fn draw_mbl_data_row(
         draw_text(
             b,
             cx + CELL_PADDING,
-            y_top + 7.0,
+            y_top + 10.0,
             cell,
             font,
             TABLE_SIZE,
