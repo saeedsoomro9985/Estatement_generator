@@ -2183,6 +2183,7 @@ name = "pdf_oxide_gen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "crossbeam-channel",
  "futures",

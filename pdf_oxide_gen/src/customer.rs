@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use num_format::{ToFormattedString, Locale};
 use crate::statement::StatementDocument;
+use chrono::NaiveDate;
 
 /// Statement models aligned with production JSON (meta, customer, summary, accounts, termDeposits).
 #[derive(Debug, Clone)]
@@ -87,8 +88,17 @@ pub struct TdrCertificateRow {
 }
 
 pub fn fmt_money(v: f64) -> String {
-    format!("{:.2}", v)
+    let s = (v * 100.0).round() as i64; // avoid float precision issues
+    let whole = s / 100;
+    let frac = (s % 100).abs();
+
+    format!(
+        "{}.{:02}",
+        whole.to_formatted_string(&Locale::en),
+        frac
+    )
 }
+
 
 
 /// Map a MongoDB statement document into the internal PDF model (same logic as before).
@@ -191,8 +201,8 @@ pub fn map_statement(rec: &StatementDocument) -> Statement {
             .transactions
             .iter()
             .map(|tx| AccountTransactionRow {
-                date: tx.transaction_date.clone(),
-                value_date: tx.transaction_date.clone(),
+                date: fmt_date(&tx.transaction_date),
+                value_date: fmt_date(&tx.transaction_date),
                 doc_no: String::new(),
                 particular: tx.transaction_details.clone(),
                 debit: fmt_money(tx.debit_amount_lc.as_f64()),
@@ -232,8 +242,8 @@ pub fn map_statement(rec: &StatementDocument) -> Statement {
             account_number: acc.account_no.clone(),
             iban: String::new(),
             currency: acc.currency.clone().unwrap_or_default(),
-            from_date: rec.meta.from_date.clone(),
-            to_date: rec.meta.to_date.clone(),
+            from_date: fmt_date(&rec.meta.from_date),
+            to_date: fmt_date(&rec.meta.to_date),
             branch: String::new(),
             opening_balance,
             closing_balance,
@@ -256,8 +266,8 @@ pub fn map_statement(rec: &StatementDocument) -> Statement {
                     .unwrap_or_else(|| td.cert_no.clone()),
 
                 profit_option: tx.profit_option.clone(),
-                start_date: tx.start_date.clone(),
-                maturity_date: tx.maturity.clone(),
+                start_date: fmt_date(&tx.start_date),
+                maturity_date: fmt_date(&tx.maturity),
                 tenure: tx.tenure.clone(),
 
                 currency: tx
@@ -281,9 +291,10 @@ pub fn map_statement(rec: &StatementDocument) -> Statement {
             account_no: td.account_no.clone().unwrap_or_default(),
             account_type: td.account_type.clone().unwrap_or_default(),
             as_of_date: td
-                .to_date
-                .clone()
-                .unwrap_or_else(|| rec.meta.to_date.clone()),
+            .to_date
+            .as_ref()
+            .map(|d| fmt_date(d))
+            .unwrap_or_else(|| fmt_date(&rec.meta.to_date)),
 
             certificates,
         }
@@ -295,11 +306,17 @@ pub fn map_statement(rec: &StatementDocument) -> Statement {
         customer_id: rec.customer.customer_id.clone(),
         cif: rec.customer.cif.clone().unwrap_or_default(),
         address: rec.customer.address.clone().unwrap_or_default(),
-        from_date: rec.meta.from_date.clone(),
-        to_date: rec.meta.to_date.clone(),
+        from_date: fmt_date(&rec.meta.from_date),
+        to_date: fmt_date(&rec.meta.to_date),
         account_summary,
         tdr_summary,
         accounts,
         term_deposits,
     }
+}
+
+pub fn fmt_date(date: &str) -> String {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|d| d.format("%d-%b-%Y").to_string())
+        .unwrap_or_else(|_| date.to_string())
 }

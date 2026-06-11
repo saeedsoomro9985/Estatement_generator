@@ -9,6 +9,11 @@ const LABEL_SIZE: f32 = 10.0;
 const TABLE_SIZE: f32 = 7.5;
 const NAV_SIZE: f32 = 11.0;
 
+pub struct HeaderConfig {
+    pub page_type: PageType,
+}
+
+
 /// Count account transaction pages (same pagination rules as the render loop).
 fn count_account_pages(stmt: &Statement) -> usize {
     let mut total = 0usize;
@@ -79,7 +84,7 @@ fn count_tdr_pages(stmt: &Statement) -> usize {
 
 pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
     // Load/rasterize the 3 templates once (parallel); disk cache makes later runs fast.
-    preload_templates()?;
+    // preload_templates()?;
 
     let mut writer = new_pdf_writer();
 
@@ -102,11 +107,11 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
     };
 
     let grand_tdr_amount: f64 = stmt
-        .term_deposits
-        .iter()
-        .flat_map(|td| td.certificates.iter())
-        .map(|c| c.amount.replace(',', "").parse::<f64>().unwrap_or(0.0))
-        .sum();
+    .term_deposits
+    .iter()
+    .flat_map(|td| td.certificates.iter())
+    .map(|c| c.amount.replace(',', "").parse::<f64>().unwrap_or(0.0))
+    .sum();
 
     let grand_tdr_certificates: usize = stmt
         .term_deposits
@@ -117,7 +122,23 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
     // ── Page 1: summary template — account + TDR summary tables ──
     {
         let mut b = ContentBuilder::new();
+
+        draw_header(
+            &mut b,
+            HeaderConfig {
+                page_type: PageType::Summary,
+            },
+        );
+
         draw_sidebar(&mut b, true, false);
+        vline(
+            &mut b,
+            120.0, // adjust position
+            135.0,                          // start Y
+            PAGE_H - 40.0,                 // line height
+            c_gray_border(),
+            0.5,
+        );
         draw_customer_block(&mut b, stmt);
 
         let acc_cols = ["Product", "Account Number", "IBAN", "Currency", "FCY Balance", "Balance"];
@@ -219,29 +240,58 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
         //     TABLE_W,
         // );
 
-        write_content_page(&mut writer, TPL_SUMMARY, &b, None, nav)?;
+        write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
     }
 
     // ── Page 2: summary template + MessageForYou image (DrawAdvert) ──
     {
         let mut b = ContentBuilder::new();
+        draw_header(
+            &mut b,
+            HeaderConfig {
+                page_type: PageType::Summary,
+            },
+        );
+
         draw_sidebar(&mut b, true, false);
+        vline(
+            &mut b,
+            120.0, // adjust position
+            135.0,                          // start Y
+            PAGE_H - 40.0,                 // line height
+            c_gray_border(),
+            0.5,
+        );
         draw_customer_block(&mut b, stmt);
         let msg_bytes = load_message_for_you_image()?;
         let img_y = PAGE_H - MSG_IMG_TOP - MSG_IMG_H;
         write_content_page(
             &mut writer,
-            TPL_SUMMARY,
             &b,
             Some((msg_bytes, MSG_IMG_X, img_y, MSG_IMG_W, MSG_IMG_H)),
             nav,
+            ReportType::Standard,
         )?;
     }
 
     // ── Account transaction pages (Account template) ──
     for acc in &stmt.accounts {
         let mut b = ContentBuilder::new();
+        draw_header(
+            &mut b,
+            HeaderConfig {
+                page_type: PageType::Account,
+            },
+        );
         draw_sidebar(&mut b, false, true);
+            vline(
+            &mut b,
+            120.0, // adjust position
+            135.0,                          // start Y
+            150.0,                 // line height
+            c_gray_border(),
+            0.5,
+        );
         draw_account_header(&mut b, acc);
 
         let cols = [
@@ -268,9 +318,24 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
 
         loop {
             if !first_page {
-                write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+                write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
                 b = ContentBuilder::new();
+                   draw_header(
+                        &mut b,
+                        HeaderConfig {
+                            page_type: PageType::Account,
+                        },
+                    );
                 draw_sidebar(&mut b, false, true);
+                  draw_sidebar(&mut b, false, true);
+                    vline(
+                    &mut b,
+                    120.0, // adjust position
+                    135.0,                          // start Y
+                    150.0,                 // line height
+                    c_gray_border(),
+                    0.5,
+                );
                 draw_account_header(&mut b, acc);
             }
             first_page = false;
@@ -316,14 +381,27 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
                 acc,
             );
 
-            write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+            write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
         } else {
             // write last transaction page first
-            write_content_page(&mut writer, TPL_ACCOUNT, &b, None, nav)?;
+            write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
 
             let mut stats_page = ContentBuilder::new();
-
+            draw_header(
+                    &mut stats_page,
+                    HeaderConfig {
+                        page_type: PageType::Account,
+                    },
+            );
             draw_sidebar(&mut stats_page, false, true);
+            vline(
+                &mut stats_page,
+                120.0, // adjust position
+                135.0,                          // start Y
+                140.0,                 // line height
+                c_gray_border(),
+                0.5,
+            );
             draw_account_header(&mut stats_page, acc);
 
             draw_account_stats_box(
@@ -334,16 +412,16 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
 
             write_content_page(
                 &mut writer,
-                TPL_ACCOUNT,
                 &stats_page,
                 None,
                 nav,
+                ReportType::Standard,
             )?;
         }
     }
 
     // ── Term deposit pages (Accounts_TermDeposit template) ──
-   for (idx, td) in stmt.term_deposits.iter().enumerate() {
+    for (idx, td) in stmt.term_deposits.iter().enumerate() {
         let is_last_tdr = idx == stmt.term_deposits.len() - 1;
 
         render_tdr_pages(
@@ -683,6 +761,9 @@ fn render_tdr_pages(
     grand_tdr_amount: f64,
     grand_tdr_certificates: usize,
 ) -> Result<()> {
+    const TOTAL_BOX_H: f32 = 36.0; // 2 rows × 18
+    const GRAND_BOX_H: f32 = 36.0;
+
     let cols = [
         "Certificate No",
         "Profit Option",
@@ -693,6 +774,7 @@ fn render_tdr_pages(
         "FCY Balance",
         "Amount",
     ];
+
     let w = 56.0;
     let widths = [w; 8];
 
@@ -701,10 +783,26 @@ fn render_tdr_pages(
 
     while idx < td.certificates.len() {
         let mut b = ContentBuilder::new();
+
+        draw_header(
+            &mut b,
+            HeaderConfig {
+                page_type: PageType::TermDeposit,
+            },
+        );
         draw_sidebar(&mut b, false, false);
+        vline(
+            &mut b,
+            120.0, // adjust position
+            135.0,                          // start Y
+            PAGE_H - 40.0,                 // line height
+            c_gray_border(),
+            0.5,
+        );
         draw_tdr_header(&mut b, td);
 
         let mut y = TDR_TABLE_TOP;
+
         draw_mbl_table_header(&mut b, CX, y, &cols, &widths, None);
         y += HDR_H;
 
@@ -713,12 +811,23 @@ fn render_tdr_pages(
         y += TDR_SECTION_BANNER_H;
 
         while idx < td.certificates.len() {
-            if idx > 0 && td.certificates[idx].cert_type_label != td.certificates[idx - 1].cert_type_label {
+            if idx > 0
+                && td.certificates[idx].cert_type_label
+                    != td.certificates[idx - 1].cert_type_label
+            {
                 let need = TDR_SECTION_BANNER_H + ROW_H;
+
                 if y + need > TDR_PAGE_BOTTOM {
                     break;
                 }
-                draw_tdr_section_banner(&mut b, td, &td.certificates[idx].cert_type_label, y);
+
+                draw_tdr_section_banner(
+                    &mut b,
+                    td,
+                    &td.certificates[idx].cert_type_label,
+                    y,
+                );
+
                 y += TDR_SECTION_BANNER_H;
             }
 
@@ -727,6 +836,7 @@ fn render_tdr_pages(
             }
 
             let cert = &td.certificates[idx];
+
             draw_mbl_data_row(
                 &mut b,
                 CX,
@@ -745,6 +855,7 @@ fn render_tdr_pages(
                 idx,
                 None,
             );
+
             y += ROW_H;
             idx += 1;
         }
@@ -765,12 +876,26 @@ fn render_tdr_pages(
                     grand_tdr_certificates,
                 );
 
-                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
             } else {
-                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
 
                 let mut b = ContentBuilder::new();
+                draw_header(
+                    &mut b,
+                    HeaderConfig {
+                        page_type: PageType::TermDeposit,
+                    },
+                );
                 draw_sidebar(&mut b, false, false);
+                vline(
+                    &mut b,
+                    120.0, // adjust position
+                    135.0,                          // start Y
+                    PAGE_H - 40.0,                 // line height
+                    c_gray_border(),
+                    0.5,
+                );
                 draw_tdr_header(&mut b, td);
 
                 draw_grand_tdr_totals_box(
@@ -780,13 +905,40 @@ fn render_tdr_pages(
                     grand_tdr_certificates,
                 );
 
-                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
             }
         }else {
-                write_content_page(writer, TPL_TDR, &b, None, nav)?;
+                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
         }
     }
+
     Ok(())
+}
+
+fn draw_header(
+    b: &mut ContentBuilder,
+    config: HeaderConfig,
+) {
+    draw_text(
+        b,
+        127.0,
+        78.0,
+        config.page_type.title(),
+        Font::Regular,
+        26.0,
+        c_black(),
+        TextAlign::Center,
+        300.0,
+    );
+
+    hline(
+        b,
+        20.0,
+        115.0,
+        PAGE_W - 40.0,
+        c_gray_border(),
+        0.5,
+    );
 }
 
 fn draw_tdr_section_banner(
@@ -797,18 +949,18 @@ fn draw_tdr_section_banner(
 ) {
     const BANNER_ROW_H: f32 = 20.0;
     filled_rect(b, CX, y, TABLE_W, BANNER_ROW_H, c_mbl_mint());
-     draw_text(
+    draw_text(
         b,
         CX + 4.0,
         y + 14.0,
-        &format!("{} - {}", td.title, td.account_no),
+        &format!("{} - {}", td.title, td.cert_no),
         Font::Regular,
         10.0,
         c_black(),
         TextAlign::Left,
         TABLE_W,
     );
-    
+
     hline(
         b,
         CX,
@@ -1020,7 +1172,7 @@ fn draw_mbl_table_header(
     let tx_w = tx_w.unwrap_or(TABLE_W);
     filled_rect(b, x, y_top, tx_w, HDR_H, c_purple());
 
-    const CELL_PADDING: f32 = 4.0;
+    const CELL_PADDING: f32 = 5.0;
     const RIGHT_PADDING: f32 = 18.0;
 
     // Match row alignment
@@ -1051,7 +1203,7 @@ fn draw_mbl_table_header(
         draw_text(
             b,
             cx + CELL_PADDING,
-            y_top + 11.0,
+            y_top + 12.0,
             hdr,
             Font::Bold,
             TABLE_SIZE,
@@ -1092,20 +1244,18 @@ fn draw_mbl_data_row(
         TextAlign::Right,  // Debit
         TextAlign::Right,  // Credit
         TextAlign::Right,  // Balance
-        TextAlign::Right,  // Amount (for TDR)
+        TextAlign::Right,  // Amount
     ];
 
-     let is_total = cells.iter().any(|v| v.trim().eq_ignore_ascii_case("Total"));
-     let is_Opening_balance = cells.iter().any(|v| v.trim().eq_ignore_ascii_case("<=Opening Balance=>"));
-     let is_Closing_balance = cells.iter().any(|v| v.trim().eq_ignore_ascii_case("<=Closing Balance=>"));
+    let is_total = cells.iter().any(|v| v.trim().eq_ignore_ascii_case("Total"));
 
-    let font = if (is_total || is_Opening_balance || is_Closing_balance)  {
+    let font = if is_total {
         Font::Bold
     } else {
         Font::Regular
     };
 
-    const CELL_PADDING: f32 = 4.0;
+    const CELL_PADDING: f32 = 5.0;
 
     let mut cx = x;
 
