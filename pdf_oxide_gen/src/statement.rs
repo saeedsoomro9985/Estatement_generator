@@ -75,6 +75,8 @@ pub struct StatementAccount {
     #[serde(default)]
     pub currency: Option<String>,
     #[serde(default)]
+    pub iban: Option<String>,
+    #[serde(default)]
     pub transactions: Vec<StatementTransaction>,
 }
 

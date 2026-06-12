@@ -240,7 +240,7 @@ pub fn map_statement(rec: &StatementDocument) -> Statement {
             title: acc.title.clone().unwrap_or_default(),
             account_type: acc.account_type.clone(),
             account_number: acc.account_no.clone(),
-            iban: String::new(),
+            iban: acc.iban.clone().unwrap_or_default(),
             currency: acc.currency.clone().unwrap_or_default(),
             from_date: fmt_date(&rec.meta.from_date),
             to_date: fmt_date(&rec.meta.to_date),

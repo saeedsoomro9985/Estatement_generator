@@ -58,7 +58,7 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 200;
 const MSSQL_BATCH_SIZE = Number(process.env.MSSQL_BATCH_SIZE) || 100;
 
 /** PDFs written by pdf_oxide_gen use this prefix. */
-const OXIDE_PDF_PREFIX = "OXIDE-";
+const OXIDE_PDF_PREFIX = "STMT-";
 
 function listOxidePdfs(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];

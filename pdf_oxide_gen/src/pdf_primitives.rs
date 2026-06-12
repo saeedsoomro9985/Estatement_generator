@@ -19,12 +19,16 @@ pub const TPL_ACCOUNT: &str = "Account";
 pub const TPL_TDR: &str = "Accounts_TermDeposit";
 
 pub const IMG_MESSAGE_FOR_YOU: &str = "MessageForYou";
+pub const IMG_ADVERT: &str = "advert";
 
 /// MessageForYou placement
 pub const MSG_IMG_X: f32 = 125.0;
 pub const MSG_IMG_TOP: f32 = 420.0;
 pub const MSG_IMG_W: f32 = 16.0 * 72.0 / 2.54;
 pub const MSG_IMG_H: f32 = 10.0 * 72.0 / 2.54;
+pub const MSG_ADVERT_W: f32 = 433.0;
+pub const MSG_ADVERT_X: f32 = 135.0;
+pub const ADVERT_IMG_H: f32 = 90.0;
 
 /// Sidebar navigation targets (0-based page indices in the final PDF).
 #[derive(Clone, Copy, Debug)]
@@ -366,6 +370,8 @@ pub fn c_teal() -> Color { Color::hex("#33BAAC") }
 pub fn c_black() -> Color { Color::hex("#000000") }
 pub fn c_white() -> Color { Color::hex("#FFFFFF") }
 pub fn c_dark_gray() -> Color { Color::hex("#404040") }
+pub fn c_light_gray() -> Color { Color::hex("#717171") }
+
 pub fn c_gray_bar() -> Color {
     Color::hex("#c2c2c2")
 }
@@ -446,10 +452,17 @@ fn compress_image_to_jpeg(raw_bytes: &[u8]) -> Result<Vec<u8>> {
 
 pub fn load_message_for_you_image() -> Result<Vec<u8>> {
     let path = resolve_report_asset(IMG_MESSAGE_FOR_YOU);
-    let raw = std::fs::read(&path).with_context(|| {
-        format!("MessageForYou image not found at {}", path.display())
-    })?;
-    compress_image_to_jpeg(&raw)
+     std::fs::read(&path).with_context(|| {
+        format!("Advert image not found at {}", path.display())
+    })
+}
+
+pub fn load_advert_image() -> Result<Vec<u8>> {
+    let path = resolve_report_asset(IMG_ADVERT);
+
+    std::fs::read(&path).with_context(|| {
+        format!("Advert image not found at {}", path.display())
+    })
 }
 
 pub fn load_logo_image(image_name: &str) -> Result<Arc<Vec<u8>>> {
@@ -482,7 +495,7 @@ pub fn load_footer_image(image_name: &str) -> Result<Arc<Vec<u8>>> {
 }
 
 fn nav_link_rect(y_top: f32) -> GRect {
-    let y = PAGE_H - y_top - NAV_LINK_H + 8.0;
+    let y = PAGE_H - y_top - NAV_LINK_H+8.0;
     GRect::new(SIDEBAR_X, y, NAV_LINK_W, NAV_LINK_H)
 }
 
@@ -515,6 +528,14 @@ pub fn add_sidebar_links_to_page(page: &mut PageBuilder<'_>, nav: NavTargets) {
     page.internal_link(nav_link_rect(NAV_LINK_Y_SUMMARY), nav.summary);
     page.internal_link(nav_link_rect(NAV_LINK_Y_ACCOUNTS), nav.accounts);
     page.internal_link(nav_link_rect(NAV_LINK_Y_TDR), nav.term_deposits);
+}
+
+pub fn add_internal_page_link(
+    page: &mut PageBuilder<'_>,
+    rect: GRect,
+    target_page: usize,
+) {
+    page.internal_link(rect, target_page);
 }
 
 // ---------------------------------------------------------------------------
@@ -591,9 +612,10 @@ impl PrecompiledImages {
 pub fn write_content_page_optimized(
     writer: &mut PdfWriter,
     builder: &ContentBuilder,
-    image: Option<(Vec<u8>, f32, f32, f32, f32)>,
+    images: &[(Vec<u8>, f32, f32, f32, f32)],
     nav: NavTargets,
     precompiled: &PrecompiledImages,
+    extra_links: &[(GRect, usize)],
 ) -> Result<()> {
     let mut page = writer.add_page(PAGE_W, PAGE_H);
     apply_builder_to_page(&mut page, builder);
@@ -603,13 +625,20 @@ pub fn write_content_page_optimized(
         page.add_element(&ContentElement::Image(right_logo.clone()));
     }
 
-    if let Some((bytes, x, y, w, h)) = image {
-        let img = ImageContent::from_bytes(GRect::new(x, y, w, h), bytes)
-            .map_err(|e| anyhow::anyhow!("MessageForYou image: {e}"))?;
-        page.add_element(&ContentElement::Image(img));
-    }
+    for (bytes, x, y, w, h) in images {
+            let img = ImageContent::from_bytes(
+                GRect::new(*x, *y, *w, *h),
+                bytes.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("Page image: {e}"))?;
+
+            page.add_element(&ContentElement::Image(img));
+        }
 
     add_sidebar_links_to_page(&mut page, nav);
+    for (rect, target_page) in extra_links {
+        page.internal_link(*rect, *target_page);
+    };
     page.add_element(&ContentElement::Image(precompiled.footer.clone()));
 
     page.finish();
@@ -625,12 +654,13 @@ pub fn write_content_page_optimized(
 pub fn write_content_page(
     writer: &mut PdfWriter,
     builder: &ContentBuilder,
-    image: Option<(Vec<u8>, f32, f32, f32, f32)>,
+    images: &[(Vec<u8>, f32, f32, f32, f32)],
     nav: NavTargets,
     report_type: ReportType,
+    extra_links: &[(GRect, usize)],
 ) -> Result<()> {
     let precompiled = PrecompiledImages::get_cached(report_type)?;
-    write_content_page_optimized(writer, builder, image, nav, &precompiled)
+    write_content_page_optimized(writer, builder, images, nav, &precompiled, extra_links)
 }
 
 // ---------------------------------------------------------------------------

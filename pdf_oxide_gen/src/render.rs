@@ -1,18 +1,25 @@
 ﻿use anyhow::Result;
-
+use std::collections::HashMap;
 use crate::customer::{Statement, fmt_money};
 use crate::pdf_primitives::*;
+use pdf_oxide::geometry::Rect as GRect;
 
 const ROW_H: f32 = 16.0;
 const HDR_H: f32 = 20.0;
 const LABEL_SIZE: f32 = 10.0;
 const TABLE_SIZE: f32 = 7.5;
 const NAV_SIZE: f32 = 11.0;
+const ADVERT_GAP: f32 = 10.0;
 
 pub struct HeaderConfig {
     pub page_type: PageType,
 }
 
+#[derive(Clone)]
+struct IbanLink {
+    iban: String,
+    rect: GRect,
+}
 
 /// Count account transaction pages (same pagination rules as the render loop).
 fn count_account_pages(stmt: &Statement) -> usize {
@@ -106,6 +113,48 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
         term_deposits: term_deposits_page,
     };
 
+    let mut account_page_map: HashMap<String, usize> = HashMap::new();
+    let mut current_page = accounts_page;
+
+    for acc in &stmt.accounts {
+        account_page_map.insert(
+            acc.iban.clone(),
+            current_page,
+        );
+
+        current_page += count_single_account_pages(acc);
+    }
+
+ fn count_single_account_pages(
+    acc: &crate::customer::AccountDetail,
+    ) -> usize {
+        let mut row_idx = 0usize;
+        let mut y = TX_TABLE_TOP + HDR_H;
+        let mut pages = 1usize;
+
+        while row_idx < acc.transactions.len() {
+            while row_idx < acc.transactions.len()
+                && y + ROW_H <= CONTENT_BOTTOM
+            {
+                y += ROW_H;
+                row_idx += 1;
+            }
+
+            if row_idx < acc.transactions.len() {
+                pages += 1;
+                y = TX_TABLE_TOP + HDR_H;
+            }
+        }
+
+        let box_y = y + ACCOUNT_BOX_MARGIN;
+
+        if box_y + ACCOUNT_BOX_H > CONTENT_BOTTOM {
+            pages += 1;
+        }
+
+        pages
+    }
+
     let grand_tdr_amount: f64 = stmt
     .term_deposits
     .iter()
@@ -151,31 +200,57 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
             "Account Summary",
             Font::Bold,
             11.0,
-            c_gray_bar(),
+            c_light_gray(),
             TextAlign::Left,
             200.0,
         );
-        let mut y = draw_mbl_table(
+
+        let mut iban_links: Vec<IbanLink> = Vec::new();
+        draw_mbl_table_header(
             &mut b,
             CX,
             ACC_SUMMARY_TOP,
             &acc_cols,
             &acc_widths,
-            stmt.account_summary
-                .iter()
-                .map(|r| {
-                    vec![
-                        r.product.as_str(),
-                        r.account_number.as_str(),
-                        r.iban.as_str(),
-                        r.currency.as_str(),
-                        r.fcy_balance.as_str(),
-                        r.balance.as_str(),
-                    ]
-                })
-                .collect::<Vec<_>>()
-                .as_slice(),
+            None,
         );
+        let mut y = ACC_SUMMARY_TOP + HDR_H;
+        for (idx, row) in stmt.account_summary.iter().enumerate() {
+            draw_mbl_data_row(
+                &mut b,
+                CX,
+                y,
+                &[
+                    row.product.as_str(),
+                    row.account_number.as_str(),
+                    row.iban.as_str(),
+                    row.currency.as_str(),
+                    row.fcy_balance.as_str(),
+                    row.balance.as_str(),
+                ],
+                &acc_widths,
+                idx,
+                None,
+            );
+
+            let iban_x =
+                CX + acc_widths[0] + acc_widths[1];
+
+            let iban_width = acc_widths[2];
+
+            iban_links.push(IbanLink {
+                iban: row.iban.clone(),
+                rect: GRect::new(
+                    iban_x,
+                    PAGE_H - (y + ROW_H),
+                    iban_width,
+                    ROW_H,
+                ),
+            });
+
+            y += ROW_H;
+        }
+
 
         let tdr_cols = [
             "Certificate Type",
@@ -199,7 +274,7 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
             "Term Deposit Summary",
             Font::Bold,
             11.0,
-            c_gray_bar(),
+            c_light_gray(),
             TextAlign::Left,
             250.0,
         );
@@ -239,8 +314,19 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
         //     TextAlign::Left,
         //     TABLE_W,
         // );
+        let mut links = Vec::new();
 
-        write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
+        for link in &iban_links {
+            if let Some(target_page) =
+                account_page_map.get(&link.iban)
+            {
+                links.push((
+                    link.rect,
+                    *target_page,
+                ));
+            }
+        }
+        write_content_page(&mut writer, &b, &[], nav,ReportType::Standard, &links)?;
     }
 
     // ── Page 2: summary template + MessageForYou image (DrawAdvert) ──
@@ -265,12 +351,30 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
         draw_customer_block(&mut b, stmt);
         let msg_bytes = load_message_for_you_image()?;
         let img_y = PAGE_H - MSG_IMG_TOP - MSG_IMG_H;
+        let advert_y = img_y - ADVERT_GAP - ADVERT_IMG_H;
+        let advert_bytes = load_advert_image()?;
         write_content_page(
             &mut writer,
             &b,
-            Some((msg_bytes, MSG_IMG_X, img_y, MSG_IMG_W, MSG_IMG_H)),
+           &[
+                (
+                    msg_bytes,
+                    MSG_IMG_X,
+                    img_y,
+                    MSG_IMG_W,
+                    MSG_IMG_H,
+                ),
+                (
+                    advert_bytes,
+                    MSG_ADVERT_X,
+                    advert_y,
+                    MSG_ADVERT_W,
+                    ADVERT_IMG_H,
+                ),
+            ],
             nav,
             ReportType::Standard,
+            &[],
         )?;
     }
 
@@ -318,7 +422,7 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
 
         loop {
             if !first_page {
-                write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
+                write_content_page(&mut writer, &b, &[], nav,ReportType::Standard, &[])?;
                 b = ContentBuilder::new();
                    draw_header(
                         &mut b,
@@ -381,10 +485,10 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
                 acc,
             );
 
-            write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
+            write_content_page(&mut writer, &b, &[], nav,ReportType::Standard, &[])?;
         } else {
             // write last transaction page first
-            write_content_page(&mut writer, &b, None, nav,ReportType::Standard)?;
+            write_content_page(&mut writer, &b, &[], nav,ReportType::Standard, &[])?;
 
             let mut stats_page = ContentBuilder::new();
             draw_header(
@@ -413,9 +517,10 @@ pub fn render_pdf(stmt: &Statement) -> Result<Vec<u8>> {
             write_content_page(
                 &mut writer,
                 &stats_page,
-                None,
+                &[],
                 nav,
                 ReportType::Standard,
+                &[],
             )?;
         }
     }
@@ -876,9 +981,9 @@ fn render_tdr_pages(
                     grand_tdr_certificates,
                 );
 
-                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
+                write_content_page(writer, &b, &[], nav,ReportType::Standard, &[])?;
             } else {
-                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
+                write_content_page(writer, &b, &[], nav,ReportType::Standard, &[])?;
 
                 let mut b = ContentBuilder::new();
                 draw_header(
@@ -905,10 +1010,10 @@ fn render_tdr_pages(
                     grand_tdr_certificates,
                 );
 
-                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
+                write_content_page(writer, &b, &[], nav,ReportType::Standard, &[])?;
             }
         }else {
-                write_content_page(writer, &b, None, nav,ReportType::Standard)?;
+                write_content_page(writer, &b, &[], nav,ReportType::Standard, &[])?;
         }
     }
 
